@@ -57,14 +57,40 @@ def main():
     port = os.environ.get("OFFICE_PORT", "8787")
     if not str(port).isdigit():
         port = "8787"
-    req = urllib.request.Request(
-        "http://127.0.0.1:%s/api/agents/report" % port,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"}, method="POST")
+    base = "http://127.0.0.1:%s" % port
+
+    def _post(path, obj):
+        req = urllib.request.Request(
+            base + path, data=json.dumps(obj).encode("utf-8"),
+            headers={"Content-Type": "application/json"}, method="POST")
+        return urllib.request.urlopen(req, timeout=TIMEOUT).read()
+
     try:
-        urllib.request.urlopen(req, timeout=TIMEOUT).read()
+        _post("/api/agents/report", payload)
     except Exception:
         pass  # server not running / busy — never block the session
+
+    # On a new user turn, pull any notes other agents left for this session and print
+    # them: Claude Code injects a UserPromptSubmit hook's stdout into the session's
+    # context, so the agent actually "receives" the message.
+    if event == "UserPromptSubmit":
+        name = ""
+        cwd = (data.get("cwd") or "").replace("\\", "/").rstrip("/")
+        if cwd:
+            name = cwd.rsplit("/", 1)[-1]
+        try:
+            raw = _post("/api/messages/pending",
+                        {"session_id": session_id, "name": name})
+            msgs = (json.loads(raw.decode("utf-8")) or {}).get("messages") or []
+        except Exception:
+            msgs = []
+        if msgs:
+            lines = ["[The Office] You have %d message(s) from other agents:"
+                     % len(msgs)]
+            for m in msgs:
+                lines.append("  • from %s: %s"
+                             % (m.get("from_name") or "an agent", m.get("text") or ""))
+            sys.stdout.write("\n".join(lines) + "\n")
 
 
 if __name__ == "__main__":

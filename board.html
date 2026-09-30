@@ -56,7 +56,15 @@
   .card .meta .tag{background:var(--idle-bg); border:1px solid var(--line); border-radius:6px; padding:2px 7px; white-space:nowrap}
   .card .meta .tag.folder{background:#eef2ff; border-color:#e0e7ff; color:#4338ca}
   @media (prefers-color-scheme: dark){.card .meta .tag.folder{background:#1e1b4b; border-color:#312e81; color:#c7d2fe}}
-  .card .caret{margin-left:auto; color:var(--muted); font-size:12px; font-weight:800}
+  .card .caret{margin-left:auto; color:var(--muted); font-size:12px; font-weight:800; cursor:pointer}
+  .card .msgbtn{color:var(--muted); font-size:12px; font-weight:800; cursor:pointer}
+  .card .badge{background:#4338ca; color:#fff; border-radius:999px; font-size:11px;
+    font-weight:800; padding:1px 7px; margin-left:6px}
+  .compose{margin-top:9px; display:flex; gap:6px}
+  .compose textarea{flex:1; min-width:0; font:inherit; font-size:12.5px; border:1px solid var(--line);
+    border-radius:7px; padding:6px; resize:vertical; background:var(--bg); color:var(--ink)}
+  .compose button{font:inherit; font-size:12px; font-weight:700; border:1px solid var(--ink);
+    border-radius:7px; background:var(--ink); color:var(--bg); padding:0 12px; cursor:pointer}
   .detail{margin-top:11px; border-top:1px dashed var(--line); padding-top:10px; display:none}
   .card.open .detail{display:block} .card.open{cursor:default}
   .detail .path{font-size:11.5px; color:var(--muted); word-break:break-all;
@@ -122,15 +130,38 @@
     if(a.model)meta.push('<span class="tag">'+esc(a.model)+'</span>');
     var op=!!open[a.session_id];
     var rec=(a.recent||[]).map(function(r){return '<li>'+esc(r)+'</li>';}).join("");
-    var det='<div class="detail">'+(a.cwd?'<p class="path">'+esc(a.cwd)+'</p>':'')+'<ul class="rec">'+(rec||'<li>no recent activity</li>')+'</ul></div>';
+    var badge=a.inbox>0?'<span class="badge" title="unread notes">📬 '+a.inbox+'</span>':'';
+    var det='<div class="detail">'+(a.cwd?'<p class="path">'+esc(a.cwd)+'</p>':'')
+      +'<ul class="rec">'+(rec||'<li>no recent activity</li>')+'</ul>'
+      +'<div class="compose"><textarea rows="2" placeholder="Leave a note for this agent…"></textarea>'
+      +'<button class="send" data-sid="'+esc(a.session_id)+'">Send</button></div></div>';
     return '<div class="card '+st+(op?' open':'')+'" data-sid="'+esc(a.session_id)+'">'
-      +'<div class="top"><span class="dot '+st+'"></span><span class="name">'+esc(head)+'</span><span class="age">'+ageT(a.age_secs)+'</span></div>'
+      +'<div class="top"><span class="dot '+st+'"></span><span class="name">'+esc(head)+'</span>'+badge+'<span class="age">'+ageT(a.age_secs)+'</span></div>'
       +'<div class="act">'+esc(a.activity||lbl(st))+'</div>'
-      +'<div class="meta">'+meta.join("")+'<span class="caret">'+(op?'close ×':'details ▸')+'</span></div>'+det+'</div>';
+      +'<div class="meta">'+meta.join("")+'<span class="msgbtn" title="send a note">✉</span>&nbsp;<span class="caret">'+(op?'close ×':'details ▸')+'</span></div>'+det+'</div>';
   }
-  function wire(){document.querySelectorAll(".card").forEach(function(el){el.onclick=function(){
-    var s=el.getAttribute("data-sid");open[s]=!open[s];el.classList.toggle("open",open[s]);
-    var c=el.querySelector(".caret");if(c)c.textContent=open[s]?"close ×":"details ▸";};});}
+  function openCard(el,s){open[s]=true;el.classList.add("open");var c=el.querySelector(".caret");if(c)c.textContent="close ×";}
+  function sendNote(el){var sid=el.getAttribute("data-sid");var ta=el.parentNode.querySelector("textarea");
+    var text=(ta.value||"").trim(); if(!text)return;
+    el.disabled=true; el.textContent="…";
+    fetch("/api/messages",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({to_session:sid,from_name:"operator",text:text})})
+      .then(function(r){return r.json();}).then(function(){ta.value="";el.textContent="Sent ✓";
+        setTimeout(function(){el.disabled=false;el.textContent="Send";},1200);})
+      .catch(function(){el.disabled=false;el.textContent="Send";});}
+  function wire(){
+    document.querySelectorAll(".card").forEach(function(el){
+      el.onclick=function(){var s=el.getAttribute("data-sid");open[s]=!open[s];
+        el.classList.toggle("open",open[s]);var c=el.querySelector(".caret");
+        if(c)c.textContent=open[s]?"close ×":"details ▸";};
+    });
+    document.querySelectorAll(".msgbtn").forEach(function(b){b.onclick=function(e){
+      e.stopPropagation();var card=b.closest(".card");openCard(card,card.getAttribute("data-sid"));
+      var ta=card.querySelector("textarea");if(ta)ta.focus();};});
+    document.querySelectorAll(".compose").forEach(function(c){c.onclick=function(e){e.stopPropagation();};});
+    document.querySelectorAll(".send").forEach(function(b){b.onclick=function(e){
+      e.stopPropagation();sendNote(b);};});
+  }
   function render(d){document.getElementById("offline").classList.remove("show");
     var b=d.buckets,c=d.counts;
     ["need","work","idle"].forEach(function(k,i){var v=[c.needs_you,c.working,c.idle][i];

@@ -16,6 +16,7 @@ Each session becomes a "desk", headlined by **Claude Code's own session title**,
 - **Zero dependencies.** Python 3.8+ standard library only.
 - **Local only.** Binds `127.0.0.1`. Nothing leaves your machine.
 - **No LLM, no API key.** Titles come from Claude Code's own rolling `aiTitle`, read straight from the session transcript.
+- **Agents can talk to each other.** Leave a note for another session; it lands in that session's context on its next turn.
 
 ![The Office](docs/screenshot.jpg)
 
@@ -72,6 +73,25 @@ See [`examples/settings.hooks.json`](examples/settings.hooks.json) for a copy-pa
   if you opt in with `OFFICE_SEND_PROMPT=1`), then to the working-directory name.
 - A session that goes silent while "working" ages to **idle** after 2 minutes; one silent
   for an hour is dropped. A clean `SessionEnd` removes its desk immediately.
+
+## Agents talking to each other
+
+Click a desk → type a note → **Send**. It's addressed to that session. On the recipient's
+**next turn**, its `UserPromptSubmit` hook pulls the note and prints it — and Claude Code
+injects a `UserPromptSubmit` hook's stdout into the session's context, so the agent
+actually *receives* the message and can act on it. A desk with unread notes shows a 📬
+badge.
+
+Agents can message each other too, not just you — any session (or script) can POST:
+
+```bash
+curl -s localhost:8787/api/messages -H "Content-Type: application/json" \
+  -d '{"from_name":"api","to_name":"webapp","text":"the /leads endpoint is live"}'
+```
+
+Address by `to_session` (exact session id) or `to_name` (a desk's folder tag). Give an
+agent a one-line instruction — "when you finish, tell the `webapp` agent" — and it can
+leave the note itself.
 
 ## Privacy
 

@@ -24,7 +24,9 @@ import datetime
 import json
 import os
 import re
+import shlex
 import sqlite3
+import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -173,6 +175,19 @@ CREATE TABLE IF NOT EXISTS agents (
   updated_at TEXT DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS ix_agents_updated ON agents(updated_at);
+
+-- Inter-agent messages. A note is addressed to a session id (exact) or a name
+-- (folder tag). It is 'delivered' once the recipient's next UserPromptSubmit hook has
+-- pulled it and injected it into that session's context.
+CREATE TABLE IF NOT EXISTS messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  from_session TEXT, from_name TEXT,
+  to_session TEXT, to_name TEXT,
+  text TEXT NOT NULL,
+  ts TEXT DEFAULT (datetime('now')),
+  delivered INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_msg_pending ON messages(delivered);
 """
 
 
@@ -314,10 +329,75 @@ def board():
     needs = [a for a in agents if a["state"] in ("blocked", "waiting")]
     work = [a for a in agents if a["state"] == "working"]
     idle = [a for a in agents if a["state"] in ("idle", "done", "offline")]
+    # attach pending inbox counts so the board can badge desks with unread notes
+    conn = _db()
+    try:
+        pend = conn.execute(
+            "SELECT to_session, to_name, COUNT(*) c FROM messages"
+            " WHERE delivered=0 GROUP BY to_session, to_name").fetchall()
+    finally:
+        conn.close()
+    by_sid, by_name = {}, {}
+    for r in pend:
+        if r["to_session"]:
+            by_sid[r["to_session"]] = by_sid.get(r["to_session"], 0) + r["c"]
+        if r["to_name"]:
+            by_name[r["to_name"]] = by_name.get(r["to_name"], 0) + r["c"]
+    for a in agents:
+        a["inbox"] = by_sid.get(a["session_id"], 0) + by_name.get(a["name"], 0)
+
     return {"agents": agents,
             "buckets": {"needs_you": needs, "working": work, "idle": idle},
             "counts": {"total": len(agents), "needs_you": len(needs),
                        "working": len(work), "idle": len(idle)}}
+
+
+# ---------------------------------------------------------------- messaging
+def send_message(payload):
+    """Leave a note for another session. Address it by `to_session` (exact id) or
+    `to_name` (folder tag / name). `from_session`/`from_name` identify the sender (an
+    agent, or 'operator' from the board UI)."""
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return {"ok": False, "error": "empty message"}
+    to_session = payload.get("to_session")
+    to_name = payload.get("to_name")
+    if not to_session and not to_name:
+        return {"ok": False, "error": "need to_session or to_name"}
+    conn = _db()
+    try:
+        with conn:
+            conn.execute(
+                "INSERT INTO messages (from_session, from_name, to_session, to_name,"
+                " text) VALUES (?,?,?,?,?)",
+                (payload.get("from_session"), payload.get("from_name") or "operator",
+                 to_session, to_name, text[:2000]))
+        return {"ok": True}
+    finally:
+        conn.close()
+
+
+def pending_messages(session_id, name=None, ack=True):
+    """Return (and by default mark delivered) the undelivered notes addressed to this
+    session — by exact id OR by its name. Called by the recipient's hook, which prints
+    them to stdout so Claude Code injects them into the session's context."""
+    if not session_id and not name:
+        return []
+    conn = _db()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM messages WHERE delivered=0 AND (to_session=? OR"
+            " (to_name IS NOT NULL AND to_name=?)) ORDER BY id",
+            (session_id, name)).fetchall()
+        msgs = [dict(r) for r in rows]
+        if ack and msgs:
+            with conn:
+                conn.execute(
+                    "UPDATE messages SET delivered=1 WHERE id IN (%s)"
+                    % ",".join("?" * len(msgs)), tuple(m["id"] for m in msgs))
+        return msgs
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------- http server
@@ -354,7 +434,15 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "not found"}, "application/json")
 
     def do_POST(self):
-        if self.path.split("?", 1)[0] != "/api/agents/report":
+        path = self.path.split("?", 1)[0]
+        routes = {
+            "/api/agents/report": report,
+            "/api/messages": send_message,
+            "/api/messages/pending": lambda p: {
+                "messages": pending_messages(p.get("session_id"), p.get("name"))},
+        }
+        fn = routes.get(path)
+        if fn is None:
             return self._send(404, {"error": "not found"}, "application/json")
         try:
             n = int(self.headers.get("Content-Length") or 0)
@@ -362,7 +450,7 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError):
             return self._send(200, {"ok": False, "error": "bad body"},
                               "application/json")
-        self._send(200, report(payload), "application/json")
+        self._send(200, fn(payload), "application/json")
 
 
 def main():
