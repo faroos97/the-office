@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Office — Claude Code agents</title>
+<style>
+  :root{
+    --bg:#f4f6f9; --panel:#ffffff; --ink:#0f172a; --muted:#64748b; --line:#e2e8f0;
+    --blocked:#dc2626; --blocked-bg:#fef2f2; --waiting:#d97706; --waiting-bg:#fffbeb;
+    --working:#16a34a; --working-bg:#f0fdf4; --idle:#94a3b8; --idle-bg:#f8fafc;
+    --shadow:0 1px 2px rgba(15,23,42,.06),0 8px 24px rgba(15,23,42,.05);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{--bg:#0b1120;--panel:#111827;--ink:#e5e7eb;--muted:#94a3b8;--line:#1f2937;
+      --blocked-bg:#2a1414;--waiting-bg:#2a2110;--working-bg:#0f2417;--idle-bg:#131a27;
+      --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.35);}
+  }
+  *{box-sizing:border-box} html,body{margin:0}
+  body{background:var(--bg); color:var(--ink);
+    font:16px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased; padding:20px 22px 60px;}
+  header.bar{display:flex; align-items:center; gap:16px; flex-wrap:wrap; margin:0 0 6px}
+  .bar h1{font-size:22px; font-weight:800; letter-spacing:-.02em; margin:0}
+  .bar h1 .sub{color:var(--muted); font-weight:600; font-size:14px; margin-left:8px}
+  .counts{display:flex; gap:14px; margin-left:auto; align-items:center; flex-wrap:wrap}
+  .chip{display:inline-flex; align-items:center; gap:7px; font-weight:700; font-size:15px;
+    background:var(--panel); border:1px solid var(--line); border-radius:999px;
+    padding:6px 13px; box-shadow:var(--shadow);}
+  .dot{width:11px; height:11px; border-radius:50%; display:inline-block; flex:0 0 auto}
+  .dot.blocked{background:var(--blocked)} .dot.waiting{background:var(--waiting)}
+  .dot.working{background:var(--working)} .dot.idle{background:var(--idle)}
+  .updated{color:var(--muted); font-size:13px; font-weight:600}
+  button.btn{font:inherit; font-size:13px; font-weight:700; cursor:pointer; color:var(--ink);
+    background:var(--panel); border:1px solid var(--line); border-radius:999px;
+    padding:6px 13px; box-shadow:var(--shadow);}
+  .hint{color:var(--muted); font-size:12.5px; font-weight:600; margin:0 0 18px}
+  .section{margin:0 0 26px}
+  .section h2{font-size:12px; font-weight:800; letter-spacing:.09em; text-transform:uppercase;
+    color:var(--muted); margin:0 0 11px; display:flex; align-items:center; gap:9px;}
+  .section h2 .n{background:var(--ink); color:var(--bg); border-radius:999px; font-size:11px;
+    min-width:20px; height:20px; display:inline-flex; align-items:center; justify-content:center; padding:0 6px;}
+  .grid{display:grid; gap:12px}
+  .grid.needs{grid-template-columns:repeat(auto-fill,minmax(340px,1fr))}
+  .grid.work{grid-template-columns:repeat(auto-fill,minmax(280px,1fr))}
+  .grid.idle{grid-template-columns:repeat(auto-fill,minmax(230px,1fr))}
+  .card{background:var(--panel); border:1px solid var(--line); border-left-width:5px;
+    border-radius:13px; padding:13px 15px; box-shadow:var(--shadow); min-width:0; cursor:pointer;}
+  .card .top{display:flex; align-items:baseline; gap:9px}
+  .card .name{font-weight:800; font-size:17px; letter-spacing:-.01em; line-height:1.25;
+    overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical}
+  .card .age{margin-left:auto; color:var(--muted); font-size:12px; font-weight:700; white-space:nowrap; flex:0 0 auto}
+  .card .act{margin:7px 0 0; font-size:14px; line-height:1.35; color:var(--muted);
+    overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical}
+  .card .meta{margin-top:9px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; color:var(--muted); font-size:12px; font-weight:600}
+  .card .meta .tag{background:var(--idle-bg); border:1px solid var(--line); border-radius:6px; padding:2px 7px; white-space:nowrap}
+  .card .meta .tag.folder{background:#eef2ff; border-color:#e0e7ff; color:#4338ca}
+  @media (prefers-color-scheme: dark){.card .meta .tag.folder{background:#1e1b4b; border-color:#312e81; color:#c7d2fe}}
+  .card .caret{margin-left:auto; color:var(--muted); font-size:12px; font-weight:800}
+  .detail{margin-top:11px; border-top:1px dashed var(--line); padding-top:10px; display:none}
+  .card.open .detail{display:block} .card.open{cursor:default}
+  .detail .path{font-size:11.5px; color:var(--muted); word-break:break-all;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; margin:0 0 8px}
+  .detail .rec{list-style:none; margin:0; padding:0}
+  .detail .rec li{font-size:12.5px; color:var(--muted); padding:2px 0;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .card.blocked{border-left-color:var(--blocked); background:var(--blocked-bg)}
+  .card.blocked .name{color:var(--blocked)}
+  .card.waiting{border-left-color:var(--waiting); background:var(--waiting-bg)}
+  .card.waiting .name{color:#b45309}
+  .card.working{border-left-color:var(--working)}
+  .card.idle{border-left-color:var(--idle); opacity:.72}
+  .card.idle .name{font-size:15px}
+  .card.blocked:not(.open){animation:pulse 1.6s ease-in-out infinite}
+  @keyframes pulse{0%,100%{box-shadow:var(--shadow)}50%{box-shadow:0 0 0 4px rgba(220,38,38,.16),var(--shadow)}}
+  .empty{background:var(--panel); border:1px dashed var(--line); border-radius:13px; padding:22px; color:var(--muted); font-weight:600; text-align:center}
+  .calm{color:var(--working); font-weight:800; font-size:17px}
+  .banner{background:var(--blocked-bg); border:1px solid var(--blocked); color:var(--blocked);
+    border-radius:11px; padding:11px 15px; margin:0 0 18px; font-weight:700; display:none}
+  .banner.show{display:block}
+  @media (max-width:520px){body{padding:14px 13px 50px}.counts{width:100%; margin-left:0}
+    .grid.needs,.grid.work,.grid.idle{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+  <div id="offline" class="banner">Feed unreachable — is <code>office.py</code> running?</div>
+  <header class="bar">
+    <h1>The Office<span class="sub">live Claude Code agents</span></h1>
+    <div class="counts">
+      <span class="chip"><span class="dot blocked"></span><span id="c-need">0</span> need you</span>
+      <span class="chip"><span class="dot working"></span><span id="c-work">0</span> working</span>
+      <span class="chip"><span class="dot idle"></span><span id="c-idle">0</span> idle</span>
+      <span class="updated" id="updated">connecting…</span>
+      <button class="btn" id="mute">Sound: on</button>
+    </div>
+  </header>
+  <p class="hint">Only sessions started <b>after</b> the hook was installed report here. If a terminal is missing, restart it. Click any desk for detail.</p>
+
+  <div class="section" id="s-need"><h2>Needs you <span class="n" id="n-need">0</span></h2><div class="grid needs" id="g-need"></div></div>
+  <div class="section" id="s-work"><h2>Working <span class="n" id="n-work">0</span></h2><div class="grid work" id="g-work"></div></div>
+  <div class="section" id="s-idle"><h2>Idle / done <span class="n" id="n-idle">0</span></h2><div class="grid idle" id="g-idle"></div></div>
+
+<script>
+(function(){
+  var POLL_MS=2000, muted=localStorage.getItem("office_muted")==="1", open={};
+  var mb=document.getElementById("mute");
+  function pm(){mb.textContent="Sound: "+(muted?"off":"on");}
+  mb.onclick=function(e){e.stopPropagation();muted=!muted;localStorage.setItem("office_muted",muted?"1":"0");pm();};
+  pm();
+  var ac=null, prevNeed={}, seen=false;
+  function chime(){ if(muted)return; try{ ac=ac||new (window.AudioContext||window.webkitAudioContext)();
+    [880,1320].forEach(function(f,i){var o=ac.createOscillator(),g=ac.createGain();o.type="sine";o.frequency.value=f;
+      o.connect(g);g.connect(ac.destination);var t=ac.currentTime+i*0.14;g.gain.setValueAtTime(0.0001,t);
+      g.gain.exponentialRampToValueAtTime(0.15,t+0.02);g.gain.exponentialRampToValueAtTime(0.0001,t+0.22);o.start(t);o.stop(t+0.24);});}catch(e){} }
+  function esc(s){return (s==null?"":String(s)).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];});}
+  function ageT(s){s=s||0;if(s<60)return s+"s ago";if(s<3600)return Math.floor(s/60)+"m ago";return Math.floor(s/3600)+"h ago";}
+  function dept(c){if(!c)return "";var p=String(c).replace(/\\/g,"/").replace(/\/+$/,"").split("/");return p[p.length-1]||"";}
+  function lbl(st){return {blocked:"blocked — needs a decision",waiting:"waiting for your reply",working:"working",idle:"idle",done:"done",offline:"offline"}[st]||st;}
+  function card(a){var st=a.state,folder=dept(a.cwd),head=a.task||folder||a.name||"session",meta=[];
+    if(folder)meta.push('<span class="tag folder">'+esc(folder)+'</span>');
+    if(a.last_tool)meta.push('<span class="tag">'+esc(a.last_tool)+'</span>');
+    if(a.model)meta.push('<span class="tag">'+esc(a.model)+'</span>');
+    var op=!!open[a.session_id];
+    var rec=(a.recent||[]).map(function(r){return '<li>'+esc(r)+'</li>';}).join("");
+    var det='<div class="detail">'+(a.cwd?'<p class="path">'+esc(a.cwd)+'</p>':'')+'<ul class="rec">'+(rec||'<li>no recent activity</li>')+'</ul></div>';
+    return '<div class="card '+st+(op?' open':'')+'" data-sid="'+esc(a.session_id)+'">'
+      +'<div class="top"><span class="dot '+st+'"></span><span class="name">'+esc(head)+'</span><span class="age">'+ageT(a.age_secs)+'</span></div>'
+      +'<div class="act">'+esc(a.activity||lbl(st))+'</div>'
+      +'<div class="meta">'+meta.join("")+'<span class="caret">'+(op?'close ×':'details ▸')+'</span></div>'+det+'</div>';
+  }
+  function wire(){document.querySelectorAll(".card").forEach(function(el){el.onclick=function(){
+    var s=el.getAttribute("data-sid");open[s]=!open[s];el.classList.toggle("open",open[s]);
+    var c=el.querySelector(".caret");if(c)c.textContent=open[s]?"close ×":"details ▸";};});}
+  function render(d){document.getElementById("offline").classList.remove("show");
+    var b=d.buckets,c=d.counts;
+    ["need","work","idle"].forEach(function(k,i){var v=[c.needs_you,c.working,c.idle][i];
+      document.getElementById("c-"+k).textContent=v;document.getElementById("n-"+k).textContent=v;});
+    var gn=document.getElementById("g-need");
+    gn.innerHTML=b.needs_you.length?b.needs_you.map(card).join(""):'<div class="empty"><span class="calm">All clear.</span> Nobody needs you right now.</div>';
+    document.getElementById("g-work").innerHTML=b.working.length?b.working.map(card).join(""):'<div class="empty">No sessions actively working.</div>';
+    var si=document.getElementById("s-idle");
+    if(b.idle.length){si.style.display="";document.getElementById("g-idle").innerHTML=b.idle.map(card).join("");}else{si.style.display="none";}
+    if(!c.total)gn.innerHTML='<div class="empty">No Claude Code sessions reporting yet.<br>Start a session — the SessionStart hook puts it on the board.</div>';
+    wire();
+    var now={},fresh=false;b.needs_you.forEach(function(a){now[a.session_id]=1;if(!prevNeed[a.session_id])fresh=true;});
+    if(fresh&&seen)chime();prevNeed=now;seen=true;
+    document.getElementById("updated").textContent="updated "+new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"});
+  }
+  function tick(){fetch("/api/agents",{cache:"no-store"}).then(function(r){if(!r.ok)throw 0;return r.json();}).then(render)
+    .catch(function(){document.getElementById("offline").classList.add("show");document.getElementById("updated").textContent="offline";});}
+  tick();setInterval(tick,POLL_MS);
+})();
+</script>
+</body>
+</html>

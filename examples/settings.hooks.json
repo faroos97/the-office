@@ -1,0 +1,23 @@
+{
+  "_comment": "Copy the `hooks` block into your ~/.claude/settings.json (global) or a project's .claude/settings.json. Replace the command with YOUR python + the absolute path to hook.py. On Windows use the full path to python.exe and escape backslashes (e.g. \"C:\\\\Python\\\\python.exe C:\\\\path\\\\the-office\\\\hook.py\").",
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "python /ABSOLUTE/PATH/the-office/hook.py" } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "python /ABSOLUTE/PATH/the-office/hook.py" } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "*", "hooks": [ { "type": "command", "command": "python /ABSOLUTE/PATH/the-office/hook.py" } ] }
+    ],
+    "Notification": [
+      { "hooks": [ { "type": "command", "command": "python /ABSOLUTE/PATH/the-office/hook.py" } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "python /ABSOLUTE/PATH/the-office/hook.py" } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "python /ABSOLUTE/PATH/the-office/hook.py" } ] }
+    ]
+  }
+}

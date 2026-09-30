@@ -1,0 +1,17 @@
+# The Office runtime state
+office.db
+office.db-wal
+office.db-shm
+*.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
