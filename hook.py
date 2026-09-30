@@ -1,19 +1,27 @@
 #!/usr/bin/env python3
-"""The Office — Claude Code hook forwarder.
+"""The Office — Claude Code hook.
 
-Claude Code runs this on every session event and pipes a JSON blob on stdin. We forward
-the bits the board needs to POST /api/agents/report on the local Office server.
+Claude Code runs this on every session event and pipes a JSON blob on stdin. It does
+three things:
 
-Wire it in your Claude Code settings (see README.md) for the events:
-  SessionStart, UserPromptSubmit, PostToolUse, Notification, Stop, SessionEnd
+  1. Reports the event to office.py so the board stays live.
+  2. SessionStart: tells the agent it is not alone and how to reach the other agents
+     (agent.py). Claude Code adds a SessionStart hook's stdout to the session context.
+  3. Delivers messages other agents left for this session:
+       - UserPromptSubmit: printed, so they land in context with the new prompt;
+       - Stop: returned as a "block" decision, so the agent reads the message and keeps
+         going instead of going idle. Only once per turn (never when Claude is already
+         continuing because of a stop hook), so two agents cannot ping-pong forever.
 
-Design: standard library only, FAIL SILENT and FAST (a hook must never slow down or
-crash a session), and PII-safe by default — it forwards the event, cwd, tool name, the
-transcript path (so the board can read Claude Code's own session title), and for a
-Notification the message. It does NOT forward prompts or transcript contents unless you
-set OFFICE_SEND_PROMPT=1 (a local-only convenience for the fallback title).
+Wire it for: SessionStart, UserPromptSubmit, PostToolUse, Notification, Stop, SessionEnd
+(see README.md). Standard library only. Fails silent and fast: a hook must never slow
+down or break a session.
 
-Config via env: OFFICE_PORT (default 8787), OFFICE_SEND_PROMPT (default off).
+Privacy: forwards the event, cwd, tool name, transcript path, and a Notification's
+message. Prompts are forwarded only with OFFICE_SEND_PROMPT=1 (first 400 chars, to
+localhost, as a fallback title).
+
+Env: OFFICE_PORT (8787) · OFFICE_SEND_PROMPT (off) · OFFICE_BRIEF=0 to skip step 2.
 """
 import json
 import os
@@ -25,6 +33,8 @@ TIMEOUT = 0.6
 
 def main():
     try:
+        # bytes -> UTF-8 explicitly: on Windows sys.stdin defaults to the ANSI code page
+        # and mangles accented characters
         raw = sys.stdin.buffer.read().decode("utf-8", "replace")
     except Exception:
         return
@@ -68,29 +78,51 @@ def main():
     try:
         _post("/api/agents/report", payload)
     except Exception:
-        pass  # server not running / busy — never block the session
+        return  # server not running: nothing else to do, never block the session
 
-    # On a new user turn, pull any notes other agents left for this session and print
-    # them: Claude Code injects a UserPromptSubmit hook's stdout into the session's
-    # context, so the agent actually "receives" the message.
-    if event == "UserPromptSubmit":
-        name = ""
-        cwd = (data.get("cwd") or "").replace("\\", "/").rstrip("/")
-        if cwd:
-            name = cwd.rsplit("/", 1)[-1]
-        try:
-            raw = _post("/api/messages/pending",
-                        {"session_id": session_id, "name": name})
-            msgs = (json.loads(raw.decode("utf-8")) or {}).get("messages") or []
-        except Exception:
-            msgs = []
-        if msgs:
-            lines = ["[The Office] You have %d message(s) from other agents:"
-                     % len(msgs)]
-            for m in msgs:
-                lines.append("  • from %s: %s"
-                             % (m.get("from_name") or "an agent", m.get("text") or ""))
-            sys.stdout.write("\n".join(lines) + "\n")
+    out = sys.stdout.buffer
+
+    if event == "SessionStart" and os.environ.get("OFFICE_BRIEF") != "0":
+        here = os.path.dirname(os.path.abspath(__file__))
+        tool = '"%s" "%s"' % (sys.executable.replace("\\", "/"),
+                              os.path.join(here, "agent.py").replace("\\", "/"))
+        brief = (
+            "[The Office] You are one of several Claude Code agents working for the "
+            "same person, each in its own terminal. To see and reach the others, run "
+            "(in PowerShell, prefix the line with &):\n"
+            "  %s <command>\n"
+            "Commands: who (who is working on what) | read <agent> (another agent's "
+            "conversation) | tell <agent> <message> | inbox --wait 300 (wait for a "
+            "reply) | new <directory> <task> (start a new agent in its own terminal).\n"
+            "<agent> = its folder name or a few words of its title. Use this when "
+            "another agent has, or should produce, something you need, rather than "
+            "asking the user to relay between terminals.\n" % tool)
+        out.write(brief.encode("utf-8"))
+        return
+
+    if event not in ("UserPromptSubmit", "Stop"):
+        return
+    if event == "Stop" and data.get("stop_hook_active"):
+        return  # already continuing because of a stop hook: do not chain
+
+    try:
+        raw = _post("/api/messages/pending", {"session_id": session_id})
+        msgs = (json.loads(raw.decode("utf-8")) or {}).get("messages") or []
+    except Exception:
+        msgs = []
+    if not msgs:
+        return
+    lines = ["[The Office] %d message(s) from other agents:" % len(msgs)]
+    for m in msgs:
+        lines.append("- from %s: %s" % (m.get("from_name") or "another agent",
+                                        m.get("text") or ""))
+    text = "\n".join(lines)
+    if event == "Stop":
+        text += ("\nRead it and act on it if it concerns your work; reply with the "
+                 "agent.py tool if an answer is expected.")
+        out.write(json.dumps({"decision": "block", "reason": text}).encode("utf-8"))
+    else:
+        out.write((text + "\n").encode("utf-8"))
 
 
 if __name__ == "__main__":

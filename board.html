@@ -3,27 +3,27 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>The Office — Claude Code agents</title>
+<title>The Office · Claude Code agents</title>
 <style>
   :root{
     --bg:#f4f6f9; --panel:#ffffff; --ink:#0f172a; --muted:#64748b; --line:#e2e8f0;
     --blocked:#dc2626; --blocked-bg:#fef2f2; --waiting:#d97706; --waiting-bg:#fffbeb;
-    --working:#16a34a; --working-bg:#f0fdf4; --idle:#94a3b8; --idle-bg:#f8fafc;
+    --working:#16a34a; --idle:#94a3b8; --soft:#f8fafc; --accent:#4338ca; --accent-bg:#eef2ff;
     --shadow:0 1px 2px rgba(15,23,42,.06),0 8px 24px rgba(15,23,42,.05);
   }
   @media (prefers-color-scheme: dark){
     :root{--bg:#0b1120;--panel:#111827;--ink:#e5e7eb;--muted:#94a3b8;--line:#1f2937;
-      --blocked-bg:#2a1414;--waiting-bg:#2a2110;--working-bg:#0f2417;--idle-bg:#131a27;
+      --blocked-bg:#2a1414;--waiting-bg:#2a2110;--soft:#131a27;--accent:#a5b4fc;--accent-bg:#1e1b4b;
       --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.35);}
   }
   *{box-sizing:border-box} html,body{margin:0}
   body{background:var(--bg); color:var(--ink);
     font:16px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
     -webkit-font-smoothing:antialiased; padding:20px 22px 60px;}
-  header.bar{display:flex; align-items:center; gap:16px; flex-wrap:wrap; margin:0 0 6px}
+  header.bar{display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin:0 0 6px}
   .bar h1{font-size:22px; font-weight:800; letter-spacing:-.02em; margin:0}
   .bar h1 .sub{color:var(--muted); font-weight:600; font-size:14px; margin-left:8px}
-  .counts{display:flex; gap:14px; margin-left:auto; align-items:center; flex-wrap:wrap}
+  .counts{display:flex; gap:12px; margin-left:auto; align-items:center; flex-wrap:wrap}
   .chip{display:inline-flex; align-items:center; gap:7px; font-weight:700; font-size:15px;
     background:var(--panel); border:1px solid var(--line); border-radius:999px;
     padding:6px 13px; box-shadow:var(--shadow);}
@@ -31,9 +31,12 @@
   .dot.blocked{background:var(--blocked)} .dot.waiting{background:var(--waiting)}
   .dot.working{background:var(--working)} .dot.idle{background:var(--idle)}
   .updated{color:var(--muted); font-size:13px; font-weight:600}
-  button.btn{font:inherit; font-size:13px; font-weight:700; cursor:pointer; color:var(--ink);
+  button{font:inherit}
+  .btn{font-size:13px; font-weight:700; cursor:pointer; color:var(--ink);
     background:var(--panel); border:1px solid var(--line); border-radius:999px;
-    padding:6px 13px; box-shadow:var(--shadow);}
+    padding:7px 14px; box-shadow:var(--shadow);}
+  .btn.pri{background:var(--ink); color:var(--bg); border-color:var(--ink)}
+  .btn:disabled{opacity:.6; cursor:default}
   .hint{color:var(--muted); font-size:12.5px; font-weight:600; margin:0 0 18px}
   .section{margin:0 0 26px}
   .section h2{font-size:12px; font-weight:800; letter-spacing:.09em; text-transform:uppercase;
@@ -45,7 +48,11 @@
   .grid.work{grid-template-columns:repeat(auto-fill,minmax(280px,1fr))}
   .grid.idle{grid-template-columns:repeat(auto-fill,minmax(230px,1fr))}
   .card{background:var(--panel); border:1px solid var(--line); border-left-width:5px;
-    border-radius:13px; padding:13px 15px; box-shadow:var(--shadow); min-width:0; cursor:pointer;}
+    border-radius:13px; padding:13px 15px; box-shadow:var(--shadow); min-width:0; cursor:pointer;
+    text-align:left; width:100%; color:inherit; display:block}
+  .card:hover{border-color:var(--muted)}
+  .card:focus-visible,.btn:focus-visible{outline:2px solid var(--accent); outline-offset:2px}
+  .card.sel{outline:2px solid var(--accent); outline-offset:1px}
   .card .top{display:flex; align-items:baseline; gap:9px}
   .card .name{font-weight:800; font-size:17px; letter-spacing:-.01em; line-height:1.25;
     overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical}
@@ -53,45 +60,68 @@
   .card .act{margin:7px 0 0; font-size:14px; line-height:1.35; color:var(--muted);
     overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical}
   .card .meta{margin-top:9px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; color:var(--muted); font-size:12px; font-weight:600}
-  .card .meta .tag{background:var(--idle-bg); border:1px solid var(--line); border-radius:6px; padding:2px 7px; white-space:nowrap}
-  .card .meta .tag.folder{background:#eef2ff; border-color:#e0e7ff; color:#4338ca}
-  @media (prefers-color-scheme: dark){.card .meta .tag.folder{background:#1e1b4b; border-color:#312e81; color:#c7d2fe}}
-  .card .caret{margin-left:auto; color:var(--muted); font-size:12px; font-weight:800; cursor:pointer}
-  .card .msgbtn{color:var(--muted); font-size:12px; font-weight:800; cursor:pointer}
-  .card .badge{background:#4338ca; color:#fff; border-radius:999px; font-size:11px;
-    font-weight:800; padding:1px 7px; margin-left:6px}
-  .compose{margin-top:9px; display:flex; gap:6px}
-  .compose textarea{flex:1; min-width:0; font:inherit; font-size:12.5px; border:1px solid var(--line);
-    border-radius:7px; padding:6px; resize:vertical; background:var(--bg); color:var(--ink)}
-  .compose button{font:inherit; font-size:12px; font-weight:700; border:1px solid var(--ink);
-    border-radius:7px; background:var(--ink); color:var(--bg); padding:0 12px; cursor:pointer}
-  .detail{margin-top:11px; border-top:1px dashed var(--line); padding-top:10px; display:none}
-  .card.open .detail{display:block} .card.open{cursor:default}
-  .detail .path{font-size:11.5px; color:var(--muted); word-break:break-all;
-    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; margin:0 0 8px}
-  .detail .rec{list-style:none; margin:0; padding:0}
-  .detail .rec li{font-size:12.5px; color:var(--muted); padding:2px 0;
-    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .tag{background:var(--soft); border:1px solid var(--line); border-radius:6px; padding:2px 7px; white-space:nowrap}
+  .tag.folder{background:var(--accent-bg); border-color:transparent; color:var(--accent)}
+  .card .open{margin-left:auto; font-weight:800}
+  .badge{background:var(--accent-bg); color:var(--accent); border-radius:999px; font-size:11px;
+    font-weight:800; padding:1px 8px; white-space:nowrap}
   .card.blocked{border-left-color:var(--blocked); background:var(--blocked-bg)}
   .card.blocked .name{color:var(--blocked)}
   .card.waiting{border-left-color:var(--waiting); background:var(--waiting-bg)}
-  .card.waiting .name{color:#b45309}
+  .card.waiting .name{color:var(--waiting)}
   .card.working{border-left-color:var(--working)}
   .card.idle{border-left-color:var(--idle); opacity:.72}
   .card.idle .name{font-size:15px}
-  .card.blocked:not(.open){animation:pulse 1.6s ease-in-out infinite}
+  .card.blocked{animation:pulse 1.6s ease-in-out infinite}
   @keyframes pulse{0%,100%{box-shadow:var(--shadow)}50%{box-shadow:0 0 0 4px rgba(220,38,38,.16),var(--shadow)}}
+  @media (prefers-reduced-motion: reduce){.card.blocked{animation:none}}
   .empty{background:var(--panel); border:1px dashed var(--line); border-radius:13px; padding:22px; color:var(--muted); font-weight:600; text-align:center}
   .calm{color:var(--working); font-weight:800; font-size:17px}
   .banner{background:var(--blocked-bg); border:1px solid var(--blocked); color:var(--blocked);
     border-radius:11px; padding:11px 15px; margin:0 0 18px; font-weight:700; display:none}
   .banner.show{display:block}
+
+  /* conversation drawer */
+  .drawer{position:fixed; top:0; right:0; bottom:0; width:min(620px,100%); background:var(--panel);
+    border-left:1px solid var(--line); box-shadow:-12px 0 40px rgba(0,0,0,.18); display:none;
+    flex-direction:column; z-index:20}
+  .drawer.show{display:flex}
+  /* on a wide screen the desks stay visible beside the open conversation */
+  @media (min-width:1100px){body.with-drawer{padding-right:calc(min(620px,100%) + 22px)}}
+  .drawer .dh{padding:16px 18px 12px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:flex-start}
+  .drawer .dh h3{margin:0; font-size:18px; font-weight:800; letter-spacing:-.01em; line-height:1.25}
+  .drawer .dh .sub{margin-top:6px; display:flex; gap:8px; flex-wrap:wrap; align-items:center; color:var(--muted); font-size:12px; font-weight:600}
+  .drawer .dh .x{margin-left:auto; flex:0 0 auto}
+  .drawer .body{flex:1; overflow-y:auto; padding:16px 18px 28px; display:flex; flex-direction:column; gap:12px}
+  .msg{max-width:100%; min-width:0}
+  .msg .who{font-size:11px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); margin:0 0 4px}
+  .msg .txt{white-space:pre-wrap; overflow-wrap:anywhere; font-size:14px; line-height:1.5}
+  .msg.user{background:var(--accent-bg); border-radius:12px; padding:10px 13px}
+  .msg.user .who{color:var(--accent)}
+  .msg .tools{margin-top:6px; color:var(--muted); font-size:12px; font-weight:600;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; overflow-wrap:anywhere}
+  .note{color:var(--muted); font-weight:600; text-align:center; padding:30px 10px}
+
+  /* new agent dialog */
+  .veil{position:fixed; inset:0; background:rgba(2,6,23,.55); display:none; align-items:center; justify-content:center; z-index:30; padding:16px}
+  .veil.show{display:flex}
+  .dialog{background:var(--panel); border:1px solid var(--line); border-radius:16px; width:min(520px,100%); padding:20px; box-shadow:var(--shadow)}
+  .dialog h3{margin:0 0 4px; font-size:18px; font-weight:800}
+  .dialog p{margin:0 0 14px; color:var(--muted); font-size:13px; font-weight:600}
+  .dialog label{display:block; font-size:12px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); margin:12px 0 5px}
+  .dialog input,.dialog textarea{width:100%; font:inherit; font-size:14px; color:var(--ink); background:var(--bg);
+    border:1px solid var(--line); border-radius:9px; padding:9px 11px}
+  .dialog textarea{resize:vertical; min-height:96px}
+  .dialog .row{display:flex; gap:10px; justify-content:flex-end; margin-top:16px; align-items:center}
+  .dialog .err{color:var(--blocked); font-size:13px; font-weight:700; margin-right:auto}
+  .dialog .ok{color:var(--working); font-size:13px; font-weight:700; margin-right:auto}
+
   @media (max-width:520px){body{padding:14px 13px 50px}.counts{width:100%; margin-left:0}
     .grid.needs,.grid.work,.grid.idle{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
-  <div id="offline" class="banner">Feed unreachable — is <code>office.py</code> running?</div>
+  <div id="offline" class="banner">Feed unreachable. Is <code>office.py</code> running?</div>
   <header class="bar">
     <h1>The Office<span class="sub">live Claude Code agents</span></h1>
     <div class="counts">
@@ -100,85 +130,169 @@
       <span class="chip"><span class="dot idle"></span><span id="c-idle">0</span> idle</span>
       <span class="updated" id="updated">connecting…</span>
       <button class="btn" id="mute">Sound: on</button>
+      <button class="btn pri" id="newbtn">+ New agent</button>
     </div>
   </header>
-  <p class="hint">Only sessions started <b>after</b> the hook was installed report here. If a terminal is missing, restart it. Click any desk for detail.</p>
+  <p class="hint">Click a desk to read its conversation. Only sessions started <b>after</b> the hook was installed report here; restart a terminal that is missing.</p>
 
   <div class="section" id="s-need"><h2>Needs you <span class="n" id="n-need">0</span></h2><div class="grid needs" id="g-need"></div></div>
   <div class="section" id="s-work"><h2>Working <span class="n" id="n-work">0</span></h2><div class="grid work" id="g-work"></div></div>
   <div class="section" id="s-idle"><h2>Idle / done <span class="n" id="n-idle">0</span></h2><div class="grid idle" id="g-idle"></div></div>
 
+  <aside class="drawer" id="drawer" aria-label="Conversation">
+    <div class="dh">
+      <div style="min-width:0">
+        <h3 id="d-title">Conversation</h3>
+        <div class="sub" id="d-sub"></div>
+      </div>
+      <button class="btn x" id="d-close">Close</button>
+    </div>
+    <div class="body" id="d-body"></div>
+  </aside>
+
+  <div class="veil" id="veil">
+    <form class="dialog" id="newform">
+      <h3>New agent</h3>
+      <p>Opens a new terminal running Claude Code in that folder, started on your task.</p>
+      <label for="n-dir">Folder</label>
+      <input id="n-dir" list="dirs" placeholder="C:\path\to\project" autocomplete="off" required>
+      <datalist id="dirs"></datalist>
+      <label for="n-task">Task</label>
+      <textarea id="n-task" placeholder="What should this agent do?" required></textarea>
+      <div class="row">
+        <span id="n-msg"></span>
+        <button type="button" class="btn" id="n-cancel">Cancel</button>
+        <button type="submit" class="btn pri" id="n-go">Start agent</button>
+      </div>
+    </form>
+  </div>
+
 <script>
 (function(){
-  var POLL_MS=2000, muted=localStorage.getItem("office_muted")==="1", open={};
-  var mb=document.getElementById("mute");
-  function pm(){mb.textContent="Sound: "+(muted?"off":"on");}
-  mb.onclick=function(e){e.stopPropagation();muted=!muted;localStorage.setItem("office_muted",muted?"1":"0");pm();};
+  var POLL_MS=2000, CONVO_MS=3000;
+  var $=function(id){return document.getElementById(id);};
+  var muted=localStorage.getItem("office_muted")==="1";
+  var selected=null, convoTimer=null, lastAgents=[];
+
+  function pm(){$("mute").textContent="Sound: "+(muted?"off":"on");}
+  $("mute").onclick=function(){muted=!muted;localStorage.setItem("office_muted",muted?"1":"0");pm();};
   pm();
+
   var ac=null, prevNeed={}, seen=false;
   function chime(){ if(muted)return; try{ ac=ac||new (window.AudioContext||window.webkitAudioContext)();
     [880,1320].forEach(function(f,i){var o=ac.createOscillator(),g=ac.createGain();o.type="sine";o.frequency.value=f;
       o.connect(g);g.connect(ac.destination);var t=ac.currentTime+i*0.14;g.gain.setValueAtTime(0.0001,t);
       g.gain.exponentialRampToValueAtTime(0.15,t+0.02);g.gain.exponentialRampToValueAtTime(0.0001,t+0.22);o.start(t);o.stop(t+0.24);});}catch(e){} }
+
   function esc(s){return (s==null?"":String(s)).replace(/[&<>"]/g,function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c];});}
   function ageT(s){s=s||0;if(s<60)return s+"s ago";if(s<3600)return Math.floor(s/60)+"m ago";return Math.floor(s/3600)+"h ago";}
   function dept(c){if(!c)return "";var p=String(c).replace(/\\/g,"/").replace(/\/+$/,"").split("/");return p[p.length-1]||"";}
-  function lbl(st){return {blocked:"blocked — needs a decision",waiting:"waiting for your reply",working:"working",idle:"idle",done:"done",offline:"offline"}[st]||st;}
-  function card(a){var st=a.state,folder=dept(a.cwd),head=a.task||folder||a.name||"session",meta=[];
+  function lbl(st){return {blocked:"blocked, needs a decision",waiting:"waiting for your reply",working:"working",idle:"idle",done:"done",offline:"offline"}[st]||st;}
+  function headOf(a){return a.task||dept(a.cwd)||a.name||"session";}
+
+  function card(a){
+    var st=a.state, folder=dept(a.cwd), meta=[];
     if(folder)meta.push('<span class="tag folder">'+esc(folder)+'</span>');
     if(a.last_tool)meta.push('<span class="tag">'+esc(a.last_tool)+'</span>');
-    if(a.model)meta.push('<span class="tag">'+esc(a.model)+'</span>');
-    var op=!!open[a.session_id];
-    var rec=(a.recent||[]).map(function(r){return '<li>'+esc(r)+'</li>';}).join("");
-    var badge=a.inbox>0?'<span class="badge" title="unread notes">📬 '+a.inbox+'</span>':'';
-    var det='<div class="detail">'+(a.cwd?'<p class="path">'+esc(a.cwd)+'</p>':'')
-      +'<ul class="rec">'+(rec||'<li>no recent activity</li>')+'</ul>'
-      +'<div class="compose"><textarea rows="2" placeholder="Leave a note for this agent…"></textarea>'
-      +'<button class="send" data-sid="'+esc(a.session_id)+'">Send</button></div></div>';
-    return '<div class="card '+st+(op?' open':'')+'" data-sid="'+esc(a.session_id)+'">'
-      +'<div class="top"><span class="dot '+st+'"></span><span class="name">'+esc(head)+'</span>'+badge+'<span class="age">'+ageT(a.age_secs)+'</span></div>'
+    if(a.inbox>0)meta.push('<span class="badge" title="messages from other agents, not read yet">'+a.inbox+' unread from agents</span>');
+    return '<button type="button" class="card '+st+(selected===a.session_id?' sel':'')+'" data-sid="'+esc(a.session_id)+'">'
+      +'<div class="top"><span class="dot '+st+'"></span><span class="name">'+esc(headOf(a))+'</span><span class="age">'+ageT(a.age_secs)+'</span></div>'
       +'<div class="act">'+esc(a.activity||lbl(st))+'</div>'
-      +'<div class="meta">'+meta.join("")+'<span class="msgbtn" title="send a note">✉</span>&nbsp;<span class="caret">'+(op?'close ×':'details ▸')+'</span></div>'+det+'</div>';
+      +'<div class="meta">'+meta.join("")+'<span class="open">conversation ▸</span></div></button>';
   }
-  function openCard(el,s){open[s]=true;el.classList.add("open");var c=el.querySelector(".caret");if(c)c.textContent="close ×";}
-  function sendNote(el){var sid=el.getAttribute("data-sid");var ta=el.parentNode.querySelector("textarea");
-    var text=(ta.value||"").trim(); if(!text)return;
-    el.disabled=true; el.textContent="…";
-    fetch("/api/messages",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({to_session:sid,from_name:"operator",text:text})})
-      .then(function(r){return r.json();}).then(function(){ta.value="";el.textContent="Sent ✓";
-        setTimeout(function(){el.disabled=false;el.textContent="Send";},1200);})
-      .catch(function(){el.disabled=false;el.textContent="Send";});}
-  function wire(){
-    document.querySelectorAll(".card").forEach(function(el){
-      el.onclick=function(){var s=el.getAttribute("data-sid");open[s]=!open[s];
-        el.classList.toggle("open",open[s]);var c=el.querySelector(".caret");
-        if(c)c.textContent=open[s]?"close ×":"details ▸";};
-    });
-    document.querySelectorAll(".msgbtn").forEach(function(b){b.onclick=function(e){
-      e.stopPropagation();var card=b.closest(".card");openCard(card,card.getAttribute("data-sid"));
-      var ta=card.querySelector("textarea");if(ta)ta.focus();};});
-    document.querySelectorAll(".compose").forEach(function(c){c.onclick=function(e){e.stopPropagation();};});
-    document.querySelectorAll(".send").forEach(function(b){b.onclick=function(e){
-      e.stopPropagation();sendNote(b);};});
-  }
-  function render(d){document.getElementById("offline").classList.remove("show");
-    var b=d.buckets,c=d.counts;
+
+  function render(d){
+    $("offline").classList.remove("show");
+    var b=d.buckets,c=d.counts; lastAgents=d.agents||[];
     ["need","work","idle"].forEach(function(k,i){var v=[c.needs_you,c.working,c.idle][i];
-      document.getElementById("c-"+k).textContent=v;document.getElementById("n-"+k).textContent=v;});
-    var gn=document.getElementById("g-need");
+      $("c-"+k).textContent=v;$("n-"+k).textContent=v;});
+    var gn=$("g-need");
     gn.innerHTML=b.needs_you.length?b.needs_you.map(card).join(""):'<div class="empty"><span class="calm">All clear.</span> Nobody needs you right now.</div>';
-    document.getElementById("g-work").innerHTML=b.working.length?b.working.map(card).join(""):'<div class="empty">No sessions actively working.</div>';
-    var si=document.getElementById("s-idle");
-    if(b.idle.length){si.style.display="";document.getElementById("g-idle").innerHTML=b.idle.map(card).join("");}else{si.style.display="none";}
-    if(!c.total)gn.innerHTML='<div class="empty">No Claude Code sessions reporting yet.<br>Start a session — the SessionStart hook puts it on the board.</div>';
-    wire();
+    $("g-work").innerHTML=b.working.length?b.working.map(card).join(""):'<div class="empty">No sessions actively working.</div>';
+    if(b.idle.length){$("s-idle").style.display="";$("g-idle").innerHTML=b.idle.map(card).join("");}else{$("s-idle").style.display="none";}
+    if(!c.total)gn.innerHTML='<div class="empty">No Claude Code sessions reporting yet.<br>Start a session, or use <b>+ New agent</b>.</div>';
+    document.querySelectorAll(".card").forEach(function(el){el.onclick=function(){openConvo(el.getAttribute("data-sid"));};});
     var now={},fresh=false;b.needs_you.forEach(function(a){now[a.session_id]=1;if(!prevNeed[a.session_id])fresh=true;});
     if(fresh&&seen)chime();prevNeed=now;seen=true;
-    document.getElementById("updated").textContent="updated "+new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"});
+    $("updated").textContent="updated "+new Date().toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"});
   }
   function tick(){fetch("/api/agents",{cache:"no-store"}).then(function(r){if(!r.ok)throw 0;return r.json();}).then(render)
-    .catch(function(){document.getElementById("offline").classList.add("show");document.getElementById("updated").textContent="offline";});}
+    .catch(function(){$("offline").classList.add("show");$("updated").textContent="offline";});}
+
+  /* ---- conversation drawer ---- */
+  function toolLine(tools){
+    var n={},order=[];tools.forEach(function(t){if(!n[t]){n[t]=0;order.push(t);}n[t]++;});
+    return order.map(function(t){return n[t]>1?t+" ×"+n[t]:t;}).join(" · ");
+  }
+  function paintConvo(c){
+    var body=$("d-body");
+    var stick=body.scrollHeight-body.scrollTop-body.clientHeight<60;
+    $("d-title").textContent=c.title||c.name||"Conversation";
+    $("d-sub").innerHTML=(c.name?'<span class="tag folder">'+esc(c.name)+'</span>':'')
+      +(c.state?'<span class="dot '+esc(c.state)+'"></span><span>'+esc(lbl(c.state))+'</span>':'');
+    if(!c.ok){body.innerHTML='<div class="note">'+esc(c.error||"This agent is gone.")+'</div>';return;}
+    if(!c.messages.length){body.innerHTML='<div class="note">'+esc(c.note||"Nothing said yet.")+'</div>';return;}
+    body.innerHTML=c.messages.map(function(m){
+      var tools=m.tools&&m.tools.length?'<div class="tools">'+esc(toolLine(m.tools))+'</div>':'';
+      return '<div class="msg '+m.role+'"><div class="who">'+(m.role==="user"?"You":"Agent")+'</div>'
+        +(m.text?'<div class="txt">'+esc(m.text)+'</div>':'')+tools+'</div>';
+    }).join("");
+    if(stick)body.scrollTop=body.scrollHeight;
+  }
+  function loadConvo(first){
+    if(!selected)return;
+    var sid=selected;
+    fetch("/api/conversation?session="+encodeURIComponent(sid),{cache:"no-store"})
+      .then(function(r){return r.json();})
+      .then(function(c){if(selected!==sid)return;paintConvo(c);
+        if(first){var b=$("d-body");b.scrollTop=b.scrollHeight;}})
+      .catch(function(){});
+  }
+  function openConvo(sid){
+    selected=sid;
+    $("d-title").textContent="Loading…";$("d-sub").innerHTML="";$("d-body").innerHTML="";
+    $("drawer").classList.add("show");document.body.classList.add("with-drawer");
+    document.querySelectorAll(".card").forEach(function(el){el.classList.toggle("sel",el.getAttribute("data-sid")===sid);});
+    loadConvo(true);
+    clearInterval(convoTimer);convoTimer=setInterval(function(){loadConvo(false);},CONVO_MS);
+  }
+  function closeConvo(){selected=null;clearInterval(convoTimer);$("drawer").classList.remove("show");
+    document.body.classList.remove("with-drawer");
+    document.querySelectorAll(".card.sel").forEach(function(el){el.classList.remove("sel");});}
+  $("d-close").onclick=closeConvo;
+
+  /* ---- new agent ---- */
+  function openNew(){
+    var seenDir={},opts=[];
+    lastAgents.forEach(function(a){if(a.cwd&&!seenDir[a.cwd]){seenDir[a.cwd]=1;opts.push('<option value="'+esc(a.cwd)+'">');}});
+    $("dirs").innerHTML=opts.join("");
+    if(!$("n-dir").value)$("n-dir").value=localStorage.getItem("office_lastdir")||"";
+    $("n-msg").textContent="";$("n-msg").className="";
+    $("veil").classList.add("show");
+    ($("n-dir").value?$("n-task"):$("n-dir")).focus();
+  }
+  function closeNew(){$("veil").classList.remove("show");}
+  $("newbtn").onclick=openNew;
+  $("n-cancel").onclick=closeNew;
+  $("veil").onclick=function(e){if(e.target===$("veil"))closeNew();};
+  $("newform").onsubmit=function(e){
+    e.preventDefault();
+    var dir=$("n-dir").value.trim(), task=$("n-task").value.trim(), go=$("n-go"), msg=$("n-msg");
+    if(!dir||!task)return;
+    go.disabled=true;msg.className="";msg.textContent="Starting…";
+    fetch("/api/spawn",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({cwd:dir,task:task})})
+      .then(function(r){return r.json();})
+      .then(function(r){go.disabled=false;
+        if(r.ok){localStorage.setItem("office_lastdir",dir);$("n-task").value="";
+          msg.className="ok";msg.textContent="Started. It appears on the board in a few seconds.";
+          setTimeout(closeNew,1400);}
+        else{msg.className="err";msg.textContent=r.error||"Could not start the agent.";}})
+      .catch(function(){go.disabled=false;msg.className="err";msg.textContent="The Office server did not answer.";});
+  };
+
+  document.addEventListener("keydown",function(e){if(e.key==="Escape"){
+    if($("veil").classList.contains("show"))closeNew();else closeConvo();}});
+
   tick();setInterval(tick,POLL_MS);
 })();
 </script>

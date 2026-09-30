@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
-"""The Office — a live dashboard for your running Claude Code sessions.
+"""The Office: a live dashboard for your running Claude Code sessions.
 
-One glanceable screen that shows every Claude Code session you have open, ranked by
-how much it needs YOU right now:
+One screen that shows every Claude Code session you have open, ranked by how much it
+needs YOU right now:
 
     blocked (needs a decision)  ->  waiting (finished, wants your reply)
         ->  working  ->  idle
 
-Each desk is headlined by Claude Code's own rolling session title, so you can tell at
-a glance which window is doing what — instead of hopping across a dozen terminals.
+Each desk is headlined by Claude Code's own rolling session title. Click a desk to read
+that agent's conversation. Agents can see each other, read each other's conversation,
+leave each other messages, and start new agents (agent.py), so they coordinate without
+you relaying between terminals.
 
-Zero dependencies (Python 3.8+ standard library only). Runs entirely on localhost.
-Fed by Claude Code hooks that POST here on every session event — see README.md.
+Zero dependencies (Python 3.8+ standard library only). Listens on 127.0.0.1 only.
+Fed by Claude Code hooks that POST here on every session event (see README.md).
 
-    python office.py            # serve on http://127.0.0.1:8787
-    python office.py --port 9000
-    OFFICE_PORT=9000 python office.py
+    python office.py                  # serve on http://127.0.0.1:8787
+    python office.py --port 9000      # or OFFICE_PORT=9000
+    python office.py --allow-spawn    # also allow starting new agents
 
 Then open http://127.0.0.1:8787 and add the hook (README) so sessions report in.
 """
@@ -25,10 +27,12 @@ import json
 import os
 import re
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs
 
 HOST = "127.0.0.1"           # localhost only, always
 DEFAULT_PORT = 8787
@@ -176,9 +180,8 @@ CREATE TABLE IF NOT EXISTS agents (
 );
 CREATE INDEX IF NOT EXISTS ix_agents_updated ON agents(updated_at);
 
--- Inter-agent messages. A note is addressed to a session id (exact) or a name
--- (folder tag). It is 'delivered' once the recipient's next UserPromptSubmit hook has
--- pulled it and injected it into that session's context.
+-- Messages between agents. Addressed to a session id. 'delivered' once the recipient's
+-- hook (end of turn, or next prompt) or its `agent.py inbox` has pulled it.
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   from_session TEXT, from_name TEXT,
@@ -196,6 +199,10 @@ def _db():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_DDL)
+    # columns added after the first release: back-fill them on an existing office.db
+    have = {r["name"] for r in conn.execute("PRAGMA table_info(agents)")}
+    if "transcript_path" not in have:
+        conn.execute("ALTER TABLE agents ADD COLUMN transcript_path TEXT")
     return conn
 
 
@@ -251,7 +258,7 @@ def report(payload):
         if event == "Notification":
             activity = (payload.get("message") or "needs your attention").strip()[:160]
         elif event == "Stop":
-            activity = "finished — waiting for you"
+            activity = "finished, waiting for you"
         elif tool:
             activity = "using %s" % tool
         elif event == "SessionStart":
@@ -269,7 +276,8 @@ def report(payload):
         fields = {"name": _friendly_name(payload), "task": task,
                   "cwd": payload.get("cwd"), "state": state,
                   "needs_you": 1 if needs_you else 0, "activity": activity,
-                  "last_tool": tool, "model": payload.get("model")}
+                  "last_tool": tool, "model": payload.get("model"),
+                  "transcript_path": payload.get("transcript_path")}
         fields = {k: v for k, v in fields.items() if v is not None}
 
         with conn:
@@ -352,27 +360,178 @@ def board():
                        "working": len(work), "idle": len(idle)}}
 
 
+# ---------------------------------------------------------------- finding an agent
+def _resolve(conn, target):
+    """Find one agent from a loose reference: exact session id, an id prefix (6+ chars),
+    its folder name, or a fragment of its title. Most recently active wins."""
+    target = (target or "").strip()
+    if not target:
+        return None
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM agents ORDER BY updated_at DESC")]
+    low = target.lower()
+    for r in rows:
+        if r["session_id"] == target:
+            return r
+    if len(target) >= 6:
+        for r in rows:
+            if r["session_id"].startswith(target):
+                return r
+    for r in rows:
+        if (r.get("name") or "").lower() == low:
+            return r
+    for r in rows:
+        if low in (r.get("task") or "").lower():
+            return r
+    return None
+
+
+def _label(row):
+    """How an agent is named to the others: its title, with its folder."""
+    if not row:
+        return None
+    title, name = row.get("task"), row.get("name")
+    if title and name:
+        return "%s (%s)" % (title, name)
+    return title or name or row.get("session_id", "")[:8]
+
+
+# ---------------------------------------------------------------- conversations
+CONVO_TAIL_BYTES = 2000000   # only the end of a transcript is read (they get large)
+CONVO_MAX_MSGS = 60
+CONVO_MSG_CHARS = 6000
+
+
+def _tail_lines(path, nbytes):
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        start = max(0, f.tell() - nbytes)
+        f.seek(start)
+        data = f.read()
+    lines = data.decode("utf-8", "replace").split("\n")
+    return lines[1:] if start > 0 else lines   # drop the partial first line
+
+
+def _entry_to_message(o):
+    """One transcript JSONL entry -> {role, text, tools} or None. Keeps what a human
+    would call the conversation: what the user typed, what the agent said, and which
+    tools it used. Drops tool results, system reminders, sub-agent chatter."""
+    role = o.get("type")
+    if role not in ("user", "assistant") or o.get("isSidechain") or o.get("isMeta"):
+        return None
+    content = (o.get("message") or {}).get("content")
+    texts, tools = [], []
+    if isinstance(content, str):
+        content = [{"type": "text", "text": content}]
+    if not isinstance(content, list):
+        return None
+    for p in content:
+        if not isinstance(p, dict):
+            continue
+        if p.get("type") == "text":
+            t = (p.get("text") or "").strip()
+            # harness-generated blocks (<system-reminder>, <local-command-...>) aren't
+            # part of the conversation a person would recognise
+            if t and not t.startswith("<"):
+                texts.append(t)
+        elif p.get("type") == "tool_use":
+            tools.append(p.get("name") or "tool")
+    text = "\n\n".join(texts)
+    if not text and not tools:
+        return None
+    if role == "user" and not text:
+        return None
+    return {"role": role, "text": text, "tools": tools, "ts": o.get("timestamp")}
+
+
+def conversation(target, limit=CONVO_MAX_MSGS):
+    """The recent conversation of one agent, read from its Claude Code transcript.
+    Only the transcript path the session's own hook reported is ever opened."""
+    conn = _db()
+    try:
+        row = _resolve(conn, target)
+    finally:
+        conn.close()
+    if not row:
+        return {"ok": False, "error": "no agent matches %r" % target}
+    path = row.get("transcript_path")
+    head = {"ok": True, "session_id": row["session_id"], "name": row.get("name"),
+            "title": row.get("task"), "state": row.get("state"),
+            "cwd": row.get("cwd"), "messages": []}
+    if not path or not os.path.exists(path):
+        head["note"] = "no transcript yet for this session"
+        return head
+    try:
+        lines = _tail_lines(path, CONVO_TAIL_BYTES)
+    except OSError:
+        head["note"] = "transcript unreadable"
+        return head
+    msgs = []
+    for ln in lines:
+        if not ln.strip():
+            continue
+        try:
+            m = _entry_to_message(json.loads(ln))
+        except ValueError:
+            continue
+        if not m:
+            continue
+        # Claude Code writes each assistant content block as its own entry: fold
+        # consecutive assistant entries into one message
+        if msgs and m["role"] == "assistant" and msgs[-1]["role"] == "assistant":
+            last = msgs[-1]
+            if m["text"]:
+                last["text"] = (last["text"] + "\n\n" + m["text"]).strip()
+            last["tools"].extend(m["tools"])
+            continue
+        msgs.append(m)
+    for m in msgs:
+        # a long working turn folds into one big message: keep its END, which is what
+        # the agent is saying now, not how it started
+        if len(m["text"]) > CONVO_MSG_CHARS:
+            m["text"] = "…" + m["text"][-CONVO_MSG_CHARS:]
+    head["messages"] = msgs[-int(limit):]
+    return head
+
+
 # ---------------------------------------------------------------- messaging
 def send_message(payload):
-    """Leave a note for another session. Address it by `to_session` (exact id) or
-    `to_name` (folder tag / name). `from_session`/`from_name` identify the sender (an
-    agent, or 'operator' from the board UI)."""
+    """One agent leaves a message for another. `to` is a loose reference (folder name,
+    title fragment, session id); `to_session` / `to_name` also work. The sender is
+    identified by `from_session`, or by `from_cwd` (the directory it runs in)."""
     text = (payload.get("text") or "").strip()
     if not text:
         return {"ok": False, "error": "empty message"}
-    to_session = payload.get("to_session")
-    to_name = payload.get("to_name")
-    if not to_session and not to_name:
-        return {"ok": False, "error": "need to_session or to_name"}
     conn = _db()
     try:
+        sender = None
+        if payload.get("from_session"):
+            sender = _resolve(conn, payload["from_session"])
+        elif payload.get("from_cwd"):
+            want = payload["from_cwd"].replace("\\", "/").rstrip("/").lower()
+            for r in conn.execute("SELECT * FROM agents ORDER BY updated_at DESC"):
+                if (r["cwd"] or "").replace("\\", "/").rstrip("/").lower() == want:
+                    sender = dict(r)
+                    break
+        from_name = _label(sender) or payload.get("from_name") or "another agent"
+
+        to_session, to_name = payload.get("to_session"), payload.get("to_name")
+        if payload.get("to") and not to_session:
+            target = _resolve(conn, payload["to"])
+            if not target:
+                return {"ok": False, "error": "no agent matches %r" % payload["to"]}
+            to_session = target["session_id"]
+        if not to_session and not to_name:
+            return {"ok": False, "error": "need `to` (or to_session / to_name)"}
+        if sender and to_session == sender["session_id"]:
+            return {"ok": False, "error": "that is your own session"}
         with conn:
             conn.execute(
                 "INSERT INTO messages (from_session, from_name, to_session, to_name,"
                 " text) VALUES (?,?,?,?,?)",
-                (payload.get("from_session"), payload.get("from_name") or "operator",
-                 to_session, to_name, text[:2000]))
-        return {"ok": True}
+                (sender["session_id"] if sender else None, from_name,
+                 to_session, to_name, text[:4000]))
+        return {"ok": True, "to": to_session or to_name}
     finally:
         conn.close()
 
@@ -398,6 +557,69 @@ def pending_messages(session_id, name=None, ack=True):
         return msgs
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------- new agent
+_SESSION_ENV = {
+    "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID", "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH", "CLAUDE_PID", "CLAUDE_JOB_DIR",
+    "CLAUDE_EFFORT", "AI_AGENT",
+}
+
+
+def _claude_bin():
+    """The claude executable: OFFICE_CLAUDE_BIN, else whatever is on PATH, else the
+    default install location (office.py may run from a context with a shorter PATH)."""
+    explicit = os.environ.get("OFFICE_CLAUDE_BIN")
+    if explicit:
+        return explicit
+    found = shutil.which("claude")
+    if found:
+        return found
+    for name in ("claude.exe", "claude"):
+        p = os.path.join(os.path.expanduser("~"), ".local", "bin", name)
+        if os.path.isfile(p):
+            return p
+    return "claude"
+
+
+def spawn_agent(payload):
+    """Open a new terminal window running an interactive `claude` session in `cwd`,
+    started on `task`. This is how you (from the board) or an agent (from agent.py)
+    creates another agent.
+
+    Off unless the server was started with OFFICE_ALLOW_SPAWN=1: it starts a local
+    program, so it is opt-in, and the server only ever listens on 127.0.0.1."""
+    if os.environ.get("OFFICE_ALLOW_SPAWN") != "1":
+        return {"ok": False, "error": "creating agents is off. Start office.py with "
+                "OFFICE_ALLOW_SPAWN=1 to turn it on."}
+    cwd = os.path.expanduser((payload.get("cwd") or "").strip() or "~")
+    if not os.path.isdir(cwd):
+        return {"ok": False, "error": "directory not found: %s" % cwd}
+    # one line, no quotes: the task is passed as a single argument, never as shell text
+    task = " ".join((payload.get("task") or "").split()).replace('"', "'")[:2000]
+    args = [_claude_bin()] + ([task] if task else [])
+    # If office.py itself was started from inside a Claude Code session, its per-session
+    # variables must not leak into the new agent (it would think it is a child session).
+    env = {k: v for k, v in os.environ.items() if k not in _SESSION_ENV}
+    try:
+        if sys.platform.startswith("win"):
+            subprocess.Popen(["cmd", "/c", "start", "Office agent", "cmd", "/k"] + args,
+                             cwd=cwd, env=env)
+        elif sys.platform == "darwin":
+            line = "cd %s && %s" % (shlex.quote(cwd),
+                                    " ".join(shlex.quote(a) for a in args))
+            subprocess.Popen(["osascript", "-e",
+                              'tell application "Terminal" to do script "%s"'
+                              % line.replace("\\", "\\\\").replace('"', '\\"')], env=env)
+        else:
+            term = os.environ.get("OFFICE_TERMINAL", "x-terminal-emulator")
+            subprocess.Popen([term, "-e"] + args, cwd=cwd, env=env)
+    except OSError as e:
+        return {"ok": False, "error": "could not open a terminal: %s" % e}
+    return {"ok": True, "cwd": cwd, "task": task}
 
 
 # ---------------------------------------------------------------- http server
@@ -431,6 +653,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, _read_page(), "text/html; charset=utf-8")
         if path == "/api/agents":
             return self._send(200, board(), "application/json; charset=utf-8")
+        if path == "/api/conversation":
+            q = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+            target = (q.get("target") or q.get("session") or [""])[0]
+            try:
+                limit = max(1, min(int((q.get("limit") or [CONVO_MAX_MSGS])[0]), 200))
+            except ValueError:
+                limit = CONVO_MAX_MSGS
+            return self._send(200, conversation(target, limit),
+                              "application/json; charset=utf-8")
         self._send(404, {"error": "not found"}, "application/json")
 
     def do_POST(self):
@@ -438,6 +669,7 @@ class Handler(BaseHTTPRequestHandler):
         routes = {
             "/api/agents/report": report,
             "/api/messages": send_message,
+            "/api/spawn": spawn_agent,
             "/api/messages/pending": lambda p: {
                 "messages": pending_messages(p.get("session_id"), p.get("name"))},
         }
@@ -454,12 +686,19 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="The Office — live Claude Code agent board")
+    ap = argparse.ArgumentParser(description="The Office: live Claude Code agent board")
     ap.add_argument("--port", type=int,
                     default=int(os.environ.get("OFFICE_PORT") or DEFAULT_PORT))
+    ap.add_argument("--allow-spawn", action="store_true",
+                    help="let the board and agents start new Claude Code sessions "
+                         "(same as OFFICE_ALLOW_SPAWN=1)")
     args = ap.parse_args()
+    if args.allow_spawn:
+        os.environ["OFFICE_ALLOW_SPAWN"] = "1"
     httpd = ThreadingHTTPServer((HOST, args.port), Handler)
-    print("The Office running at http://%s:%d  (Ctrl-C to stop)" % (HOST, args.port))
+    print("The Office running at http://%s:%d  (Ctrl-C to stop)%s" % (
+        HOST, args.port,
+        "  [new agents: on]" if os.environ.get("OFFICE_ALLOW_SPAWN") == "1" else ""))
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
