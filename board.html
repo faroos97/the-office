@@ -81,6 +81,43 @@
     border-radius:11px; padding:11px 15px; margin:0 0 18px; font-weight:700; display:none}
   .banner.show{display:block}
 
+  /* task list */
+  .section h2 .tsum{font-weight:700; letter-spacing:0; text-transform:none; font-size:12.5px}
+  .section h2 .tact{margin-left:auto; display:flex; gap:8px}
+  .section h2 .tact .btn{padding:5px 12px; font-size:12px; letter-spacing:0; text-transform:none}
+  .tlist{display:flex; flex-direction:column; gap:7px}
+  .trow{background:var(--panel); border:1px solid var(--line); border-left-width:5px; border-radius:11px;
+    padding:9px 13px; box-shadow:var(--shadow); cursor:pointer; width:100%; text-align:left; color:inherit; display:block}
+  .trow:hover{border-color:var(--muted)}
+  .trow .line{display:flex; align-items:baseline; gap:9px; flex-wrap:wrap}
+  .trow .tref{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12px; font-weight:700; color:var(--muted)}
+  .trow .ttitle{font-weight:800; font-size:15px; min-width:0; overflow-wrap:anywhere}
+  .trow .tag{font-size:12px; font-weight:600; color:var(--muted)}
+  .trow .tag.folder{color:var(--accent)}
+  .trow .tmeta{margin-left:auto; color:var(--muted); font-size:12px; font-weight:700; white-space:nowrap}
+  .trow .tsummary{margin-top:5px; color:var(--muted); font-size:13px; line-height:1.4;
+    overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical}
+  .trow.open .tsummary{display:none}
+  .pill{font-size:11px; font-weight:800; border-radius:999px; padding:1px 9px; white-space:nowrap; border:1px solid transparent}
+  .pill.pending{background:var(--soft); border-color:var(--line); color:var(--muted)}
+  .pill.running{background:var(--working); color:#fff}
+  .pill.done{background:transparent; border-color:var(--working); color:var(--working)}
+  .pill.blocked,.pill.failed{background:var(--blocked); color:#fff}
+  .pill.cancelled{background:transparent; border-color:var(--line); color:var(--muted)}
+  .trow.pending{border-left-color:var(--idle)} .trow.running{border-left-color:var(--working)}
+  .trow.done{border-left-color:var(--working); opacity:.78} .trow.cancelled{border-left-color:var(--idle); opacity:.6}
+  .trow.blocked,.trow.failed{border-left-color:var(--blocked); background:var(--blocked-bg)}
+  .tdetail{display:none; margin-top:9px; border-top:1px dashed var(--line); padding-top:9px; font-size:13px; line-height:1.45; cursor:default}
+  .trow.open .tdetail{display:block}
+  .tdetail h4{margin:9px 0 3px; font-size:11px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; color:var(--muted)}
+  .tdetail h4:first-child{margin-top:0}
+  .tdetail .pre{white-space:pre-wrap; overflow-wrap:anywhere}
+  .tdetail ul{margin:0; padding-left:18px}
+  .tdetail .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:12px; overflow-wrap:anywhere}
+  .tdetail .acts{display:flex; gap:8px; margin-top:11px}
+  .tdetail .acts .btn{padding:5px 12px; font-size:12px}
+  .tmore{color:var(--muted); font-size:12.5px; font-weight:700; background:none; border:0; cursor:pointer; padding:4px 2px; text-align:left}
+
   /* conversation drawer */
   .drawer{position:fixed; top:0; right:0; bottom:0; width:min(620px,100%); background:var(--panel);
     border-left:1px solid var(--line); box-shadow:-12px 0 40px rgba(0,0,0,.18); display:none;
@@ -135,6 +172,12 @@
   </header>
   <p class="hint">Click a desk to read its conversation. Only sessions started <b>after</b> the hook was installed report here; restart a terminal that is missing.</p>
 
+  <div class="section" id="s-tasks">
+    <h2>Tasks <span class="n" id="n-tasks">0</span><span class="tsum" id="t-sum"></span>
+      <span class="tact"><button class="btn" id="t-run">Run tasks</button><button class="btn" id="t-add">+ Task</button></span></h2>
+    <div class="tlist" id="g-tasks"></div>
+  </div>
+
   <div class="section" id="s-need"><h2>Needs you <span class="n" id="n-need">0</span></h2><div class="grid needs" id="g-need"></div></div>
   <div class="section" id="s-work"><h2>Working <span class="n" id="n-work">0</span></h2><div class="grid work" id="g-work"></div></div>
   <div class="section" id="s-idle"><h2>Idle / done <span class="n" id="n-idle">0</span></h2><div class="grid idle" id="g-idle"></div></div>
@@ -163,6 +206,27 @@
         <span id="n-msg"></span>
         <button type="button" class="btn" id="n-cancel">Cancel</button>
         <button type="submit" class="btn pri" id="n-go">Start agent</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="veil" id="tveil">
+    <form class="dialog" id="taskform">
+      <h3>New task</h3>
+      <p>Goes on the list. The task runner hands it to a worker when it is its turn.</p>
+      <label for="k-title">Title</label>
+      <input id="k-title" placeholder="Short name for the work" autocomplete="off" required>
+      <label for="k-dir">Folder the work belongs to</label>
+      <input id="k-dir" list="dirs" placeholder="C:\path\to\project\area" autocomplete="off">
+      <label for="k-body">What to do</label>
+      <textarea id="k-body" placeholder="What to produce, for whom, where to put it, how to tell it is done."></textarea>
+      <label for="k-kind">Kind</label>
+      <input id="k-kind" list="kinds" placeholder="default" autocomplete="off">
+      <datalist id="kinds"></datalist>
+      <div class="row">
+        <span id="k-msg"></span>
+        <button type="button" class="btn" id="k-cancel">Cancel</button>
+        <button type="submit" class="btn pri" id="k-go">Add task</button>
       </div>
     </form>
   </div>
@@ -263,9 +327,7 @@
 
   /* ---- new agent ---- */
   function openNew(){
-    var seenDir={},opts=[];
-    lastAgents.forEach(function(a){if(a.cwd&&!seenDir[a.cwd]){seenDir[a.cwd]=1;opts.push('<option value="'+esc(a.cwd)+'">');}});
-    $("dirs").innerHTML=opts.join("");
+    fillDirs();
     if(!$("n-dir").value)$("n-dir").value=localStorage.getItem("office_lastdir")||"";
     $("n-msg").textContent="";$("n-msg").className="";
     $("veil").classList.add("show");
@@ -290,10 +352,98 @@
       .catch(function(){go.disabled=false;msg.className="err";msg.textContent="The Office server did not answer.";});
   };
 
+  /* ---- tasks ---- */
+  var openTask={}, showDone=false, lastTasks=null;
+  var T_ORDER={blocked:0,failed:0,running:1,pending:2,done:3,cancelled:3};
+  function list(title,items,cls){
+    return items.length?'<h4>'+title+'</h4><ul'+(cls?' class="'+cls+'"':'')+'>'+items.map(function(x){return '<li>'+esc(x)+'</li>';}).join("")+'</ul>':'';
+  }
+  function taskRow(t){
+    var res=t.result||{}, meta=[], det='', acts='';
+    if(t.dir)meta.push('<span class="tag folder">'+esc(dept(t.dir))+'</span>');
+    if(t.kind&&t.kind!=="default")meta.push('<span class="tag">'+esc(t.kind)+'</span>');
+    var deps=(t.deps||[]).length?' · after '+t.deps.map(function(d){return "T-"+d;}).join(", "):'';
+    if(t.body)det+='<h4>What to do</h4><div class="pre">'+esc(t.body)+'</div>';
+    if(t.summary)det+='<h4>Outcome</h4><div class="pre">'+esc(t.summary)+'</div>';
+    det+=list("Findings",res.unresolved_findings||res.findings||[]);
+    det+=list("Files",res.artifact_paths||res.artifacts||[],"mono");
+    if(res.run_dir)det+='<h4>Run folder</h4><div class="mono">'+esc(res.run_dir)+'</div>';
+    if(t.dir)det+='<h4>Folder</h4><div class="mono">'+esc(t.dir)+'</div>';
+    if(t.status==="blocked"||t.status==="failed"||t.status==="cancelled")acts+='<button type="button" class="btn" data-act="retry" data-id="'+t.id+'">Retry</button>';
+    if(t.status==="pending")acts+='<button type="button" class="btn" data-act="cancel" data-id="'+t.id+'">Cancel</button>';
+    if(acts)det+='<div class="acts">'+acts+'</div>';
+    return '<div class="trow '+t.status+(openTask[t.id]?' open':'')+'" data-tid="'+t.id+'" tabindex="0" role="button">'
+      +'<div class="line"><span class="pill '+t.status+'">'+t.status+'</span><span class="tref">'+t.ref+'</span>'
+      +'<span class="ttitle">'+esc(t.title)+'</span>'+meta.join("")
+      +'<span class="tmeta">attempt '+t.attempts+'/'+t.max_attempts+deps+'</span></div>'
+      +(t.summary&&t.status!=="pending"?'<div class="tsummary">'+esc(t.summary)+'</div>':'')
+      +'<div class="tdetail">'+det+'</div></div>';
+  }
+  function taskAction(body){
+    return fetch("/api/tasks/update",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)}).then(tickTasks);
+  }
+  function renderTasks(d){
+    lastTasks=d;
+    var ts=d.tasks.slice().sort(function(a,b){var x=T_ORDER[a.status]-T_ORDER[b.status];
+      return x||(T_ORDER[a.status]===3?b.id-a.id:a.id-b.id);});
+    var live=ts.filter(function(t){return T_ORDER[t.status]<3;}), closed=ts.filter(function(t){return T_ORDER[t.status]===3;});
+    var c=d.counts, need=(c.blocked||0)+(c.failed||0), parts=[];
+    if(need)parts.push(need+" need you"); if(c.running)parts.push(c.running+" running");
+    if(c.pending)parts.push(c.pending+" queued"); if(c.done)parts.push(c.done+" done");
+    $("n-tasks").textContent=live.length; $("t-sum").textContent=parts.join(" · ");
+    var html=live.map(taskRow).join("");
+    if(closed.length){
+      html+='<button type="button" class="tmore" id="t-more">'+(showDone?"Hide":"Show")+' finished ('+closed.length+')</button>';
+      if(showDone)html+=closed.slice(0,15).map(taskRow).join("");
+    }
+    if(!ts.length)html='<div class="empty">No tasks yet. Add one with <b>+ Task</b>, or let an agent queue work with <code>agent.py task add</code>.</div>';
+    $("g-tasks").innerHTML=html;
+    var run=$("t-run"); run.style.display=d.can_run?"":"none";
+    run.disabled=d.runner_active||!c.pending; run.textContent=d.runner_active?"Runner working…":"Run tasks";
+    $("kinds").innerHTML=(d.kinds||[]).map(function(k){return '<option value="'+esc(k)+'">';}).join("");
+    document.querySelectorAll(".trow").forEach(function(el){
+      el.onclick=function(){var id=el.getAttribute("data-tid");openTask[id]=!openTask[id];el.classList.toggle("open",!!openTask[id]);};
+      el.onkeydown=function(e){if(e.key==="Enter"&&e.target===el)el.onclick();};
+    });
+    document.querySelectorAll(".tdetail").forEach(function(el){el.onclick=function(e){e.stopPropagation();};});
+    document.querySelectorAll(".tdetail [data-act]").forEach(function(b){b.onclick=function(e){
+      e.stopPropagation();b.disabled=true;var id=+b.getAttribute("data-id");
+      taskAction(b.getAttribute("data-act")==="retry"?{id:id,retry:true}:{id:id,status:"cancelled"});};});
+    var more=$("t-more"); if(more)more.onclick=function(){showDone=!showDone;renderTasks(lastTasks);};
+  }
+  function tickTasks(){return fetch("/api/tasks",{cache:"no-store"}).then(function(r){return r.json();}).then(renderTasks).catch(function(){});}
+  $("t-run").onclick=function(){$("t-run").disabled=true;
+    fetch("/api/tasks/run",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"})
+      .then(function(r){return r.json();}).then(function(r){if(!r.ok)$("t-sum").textContent=r.error||"could not start the runner";tickTasks();});};
+  function fillDirs(){
+    var seenDir={},opts=[];
+    lastAgents.forEach(function(a){if(a.cwd&&!seenDir[a.cwd]){seenDir[a.cwd]=1;opts.push('<option value="'+esc(a.cwd)+'">');}});
+    ((lastTasks&&lastTasks.tasks)||[]).forEach(function(t){if(t.dir&&!seenDir[t.dir]){seenDir[t.dir]=1;opts.push('<option value="'+esc(t.dir)+'">');}});
+    $("dirs").innerHTML=opts.join("");
+  }
+  function closeTask(){$("tveil").classList.remove("show");}
+  $("t-add").onclick=function(){fillDirs();$("k-msg").textContent="";$("k-msg").className="";$("tveil").classList.add("show");$("k-title").focus();};
+  $("k-cancel").onclick=closeTask;
+  $("tveil").onclick=function(e){if(e.target===$("tveil"))closeTask();};
+  $("taskform").onsubmit=function(e){
+    e.preventDefault();
+    var title=$("k-title").value.trim(), go=$("k-go"), msg=$("k-msg"); if(!title)return;
+    go.disabled=true;
+    fetch("/api/tasks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
+        title:title,dir:$("k-dir").value.trim(),body:$("k-body").value.trim(),kind:$("k-kind").value.trim(),created_by:"operator"})})
+      .then(function(r){return r.json();})
+      .then(function(r){go.disabled=false;
+        if(r.ok){$("k-title").value="";$("k-body").value="";closeTask();tickTasks();}
+        else{msg.className="err";msg.textContent=r.error||"Could not add the task.";}})
+      .catch(function(){go.disabled=false;msg.className="err";msg.textContent="The Office server did not answer.";});
+  };
+
   document.addEventListener("keydown",function(e){if(e.key==="Escape"){
-    if($("veil").classList.contains("show"))closeNew();else closeConvo();}});
+    if($("tveil").classList.contains("show"))closeTask();
+    else if($("veil").classList.contains("show"))closeNew();else closeConvo();}});
 
   tick();setInterval(tick,POLL_MS);
+  tickTasks();setInterval(tickTasks,POLL_MS);
 })();
 </script>
 </body>

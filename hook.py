@@ -110,8 +110,9 @@ def main():
             "  %s <command>\n"
             "Commands: who | read <agent> (its conversation) | tell <agent> <message> "
             "| inbox --wait 300 (wait for a reply) | new <directory> <task> (start a "
-            "new agent in its own terminal). <agent> = its folder name or a few words "
-            "of its title." % tool,
+            "new agent in its own terminal) | task list | task add <directory> <title> "
+            "<details> (queue work on the shared task list for the task runner). "
+            "<agent> = its folder name or a few words of its title." % tool,
             "Team rules:\n"
             "- Before you research or build something, check the teammates above. If "
             "one already did it or is doing it, `read` its conversation and reuse the "

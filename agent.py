@@ -6,6 +6,9 @@
     python agent.py tell <agent> <message>    leave a message for another agent
     python agent.py inbox [--wait SECONDS]    messages for you (optionally wait for one)
     python agent.py new <directory> <task>    start a new agent (its own terminal) on a task
+    python agent.py task list                 the shared task list
+    python agent.py task add <directory> <title> [details] [--kind K] [--after T-1,T-2]
+    python agent.py task run                  start the runner that works through the list
 
 <agent> is loose: its folder name, a few words of its title, or the start of its session
 id. A message reaches an agent that is mid-turn when that turn ends; an agent sitting
@@ -123,6 +126,73 @@ def inbox(wait=0):
         time.sleep(3)
 
 
+def _flag(args, name):
+    """Pull `--name value` out of an argument list."""
+    if name in args:
+        i = args.index(name)
+        if len(args) > i + 1:
+            value = args[i + 1]
+            del args[i:i + 2]
+            return value
+        del args[i]
+    return None
+
+
+def task(args):
+    """The shared task list: work queued for the task runner instead of being done by
+    whoever happens to be talking."""
+    sub = args[0] if args else "list"
+    if sub == "list":
+        data = _get("/api/tasks")
+        tasks = data["tasks"]
+        if not tasks:
+            print("The task list is empty.")
+            return 0
+        for t in tasks:
+            after = (" after %s" % ",".join("T-%d" % d for d in t["deps"])) if t["deps"] else ""
+            print("%s [%s] %s  (%s, attempt %d/%d%s)" % (
+                t["ref"], t["status"], t["title"], t.get("dir") or "no folder",
+                t["attempts"], t["max_attempts"], after))
+            if t.get("summary") and t["status"] != "pending":
+                print("     %s" % t["summary"][:300])
+        return 0
+    if sub == "show" and len(args) >= 2:
+        for t in _get("/api/tasks")["tasks"]:
+            if t["ref"].lower() == args[1].lower() or str(t["id"]) == args[1]:
+                print(json.dumps(t, indent=2, ensure_ascii=False))
+                return 0
+        print("error: no such task")
+        return 1
+    if sub == "add" and len(args) >= 3:
+        rest = list(args[1:])
+        kind = _flag(rest, "--kind")
+        after = _flag(rest, "--after")
+        if len(rest) < 2:
+            print("usage: task add <directory> <title> [details] [--kind K] [--after T-1,T-2]")
+            return 2
+        r = _post("/api/tasks", {
+            "dir": os.path.abspath(rest[0]), "title": rest[1],
+            "body": " ".join(rest[2:]), "kind": kind,
+            "deps": [d for d in (after or "").split(",") if d.strip()],
+            "created_by": ME[:8] or "an agent"})
+        if not r.get("ok"):
+            print("error: %s" % r.get("error"))
+            return 1
+        print("Queued as %s." % r["task"]["ref"])
+        return 0
+    if sub == "run":
+        r = _post("/api/tasks/run", {})
+        if not r.get("ok"):
+            print("error: %s" % r.get("error"))
+            return 1
+        print("The runner was already going." if r.get("already_running")
+              else "Runner started.")
+        return 0
+    print("usage: task list | task show <id> | task add <directory> <title> [details] "
+          "[--kind K] [--after T-1,T-2] | task run")
+    return 2
+
+
 def new(directory, task):
     r = _post("/api/spawn", {"cwd": os.path.abspath(directory), "task": task})
     if not r.get("ok"):
@@ -149,6 +219,8 @@ def main(argv):
             return tell(argv[2], " ".join(argv[3:]))
         if cmd == "new" and len(argv) >= 4:
             return new(argv[2], " ".join(argv[3:]))
+        if cmd == "task":
+            return task(argv[2:])
         if cmd == "inbox":
             wait = 0
             if "--wait" in argv:

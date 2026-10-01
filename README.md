@@ -78,6 +78,19 @@ $ agent.py inbox --wait 240
 
 **+ New agent** on the board asks for a folder and a task, then opens a terminal running Claude Code there, already working on it.
 
+### 6. A task list, and a runner that works through it
+
+Not everything needs a conversation. Put work on the list (**+ Task** on the board, or `agent.py task add` from any agent) and press **Run tasks**. The runner takes each ready task in turn, hands it to a worker, and shows that worker as a desk while it runs. A task can wait for others (`--after T-1,T-2`), gets a limited number of attempts, and ends as done, or as blocked with the reason, so the ones that need you are the ones you see.
+
+```text
+$ agent.py task add ./webapp "Pricing page copy" "Three tiers, plain language, no claims we cannot back." --kind cheap
+Queued as T-4.
+$ agent.py task add ./webapp "Review the pricing page" --after T-4
+Queued as T-5.
+```
+
+By default the worker is a headless Claude Code session (`claude -p`) in the task's folder. If you already have your own engine, with planning, an independent review, model routing, plug it in with two lines of config (see [Your own worker](#your-own-worker)). The author runs it this way: a real run went plan, write, review, fix, second review, and came back blocked because the reviewer would not accept the result, with every finding listed on the board.
+
 ## Quick start
 
 1. Clone this repo.
@@ -130,13 +143,34 @@ Shared ground:
 
 Every session receives it at start. That last rule matters more than it looks: several agents in one checkout will switch branches under each other unless told not to.
 
+## Your own worker
+
+Create `config.json` next to `office.py`:
+
+```json
+{
+  "worker_cmd": ["python", "/path/to/my_worker.py"],
+  "kinds": ["default", "cheap", "research"]
+}
+```
+
+`kinds` are the labels offered in the task form; your worker decides what they mean (a model tier, a pipeline). The runner starts `worker_cmd` once per task:
+
+- The task arrives as one JSON object on stdin: `id`, `ref`, `title`, `body`, `dir`, `kind`, `attempts`.
+- Progress is optional, one line on stderr each time: `##office activity: reviewing`. It shows on the worker's desk.
+- The outcome is the last such line on stdout: `##office result: {"status": "done", "summary": "..."}`. Status is `done`, `blocked` (a person has to look), `failed`, or `pending` (not now, try later, no attempt spent). Anything else in the object is kept as the receipt; `artifact_paths`, `unresolved_findings` and `run_dir` are displayed.
+- With no result line, exit code 0 means done.
+
+Without a `config.json`, the built-in worker runs `claude -p` and you can pass it extra arguments, such as a model or a permission mode, in `OFFICE_WORKER_ARGS`.
+
 ## How it works
 
 | File | Role |
 |---|---|
 | `office.py` | The server. Keeps one row per session in SQLite, serves the board, reads conversations, stores messages, starts new agents. |
 | `hook.py` | Runs on every Claude Code event. Reports it to the server, and prints the roster, the rules and any messages so Claude Code adds them to the session's context. |
-| `agent.py` | The tool agents use to see and reach each other. |
+| `agent.py` | The tool agents use to see and reach each other, and to queue tasks. |
+| `runner.py` | Works through the task list: claims a ready task, runs the worker, records the outcome. |
 | `board.html` | The board. Polls the server every two seconds. |
 
 The parts worth knowing:
@@ -146,11 +180,13 @@ The parts worth knowing:
 - **Presence** needs no cleanup. A session that goes silent while working turns idle after two minutes and leaves the board after an hour. A clean exit removes it at once.
 - **Messages** wait in the server until the recipient collects them. At the end of a turn, the hook hands a waiting message back to Claude as a reason to keep going. That happens at most once per turn, so two agents cannot keep each other running forever.
 - **New agents** start with `claude "<task>"` in a new terminal window. The task is passed as a single argument, never as shell text, and the new session does not inherit the per-session environment of whatever started it.
+- **Tasks** live in the same SQLite file. Claiming one is a single transaction, so two runners never take the same task. The queue settles itself: a task out of attempts fails, a task whose dependency did not finish is blocked, and a task whose runner went silent for five minutes goes back in the queue.
 - **The hook fails silent and fast.** If the server is not running, your sessions do not notice.
 
 ## What it costs, and what it cannot do
 
 - **Tokens.** The briefing a session receives at start is about 400 tokens, plus about 40 per teammate, plus your `team.md`. After that it only receives the roster again when the team changes. Agents that talk to each other spend what any Claude turn spends, on both sides.
+- **A worker is a full Claude Code session unless you slim it.** The built-in worker runs `claude -p` with your global settings, plugins and MCP servers. On the author's machine, which has many of them and a large default model, a one-word task cost $0.84. Pass a smaller model and fewer extras in `OFFICE_WORKER_ARGS`, or use your own worker.
 - **An idle agent is not woken by `tell`.** A session sitting at its prompt has no hook running, so the message waits for its next prompt and its desk shows an unread badge. `tell` says so when it happens, so the sender does not wait for nothing. Recent Claude Code builds have their own `SendMessage` tool between sessions, which does wake an idle one, and the rules point agents to it. Otherwise the agent starts a new one.
 - **Only hooked sessions are on the team.** A session started in a project without the hook is invisible to the others. Put the hook in `~/.claude/settings.json` to cover everything.
 - **Tested on Windows.** The macOS and Linux launchers for new agents are written but have not been run. Everything else is plain Python. Reports are welcome.
@@ -167,7 +203,10 @@ The parts worth knowing:
 | Setting | Default | What it does |
 |---|---|---|
 | `--port` / `OFFICE_PORT` | `8787` | Port for the server, the hook and `agent.py`. |
-| `--allow-spawn` / `OFFICE_ALLOW_SPAWN=1` | off | Let the board and agents start new sessions. |
+| `--allow-spawn` / `OFFICE_ALLOW_SPAWN=1` | off | Let the board and agents start new sessions and run tasks. |
+| `config.json` / `OFFICE_CONFIG` | none | Your own worker command and task kinds. |
+| `OFFICE_WORKER_ARGS` | none | Extra arguments for the built-in `claude -p` worker. |
+| `OFFICE_WORKER_TIMEOUT` | `3600` | Seconds before a worker is stopped. |
 | `OFFICE_TEAM_FILE` | `team.md` next to `hook.py` | Your own team rules. |
 | `OFFICE_BRIEF=0` | on | Do not tell sessions about their teammates. |
 | `OFFICE_DB` | `./office.db` | Where the SQLite file lives. |

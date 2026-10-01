@@ -191,6 +191,27 @@ CREATE TABLE IF NOT EXISTS messages (
   delivered INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS ix_msg_pending ON messages(delivered);
+
+-- The task list: work queued for the task runner (runner.py). A task is ready when it
+-- is pending, has attempts left, and every task it depends on is done.
+CREATE TABLE IF NOT EXISTS tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  body TEXT,                              -- the instruction handed to the worker
+  dir TEXT,                               -- folder the work belongs to
+  kind TEXT DEFAULT 'default',            -- free label the worker may use (e.g. a model class)
+  deps TEXT DEFAULT '[]',                 -- JSON list of task ids that must be done first
+  status TEXT NOT NULL DEFAULT 'pending', -- pending|running|done|blocked|failed|cancelled
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 2,
+  owner TEXT, created_by TEXT,
+  summary TEXT,                           -- one paragraph: what happened
+  result TEXT,                            -- JSON receipt from the worker
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now')),
+  started_at TEXT, finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_tasks_status ON tasks(status);
 """
 
 
@@ -269,6 +290,11 @@ def report(payload):
             activity = "new request"
         else:
             activity = None
+
+        if payload.get("activity"):
+            # a reporter that is not a Claude Code hook (the task runner) says in its
+            # own words what its worker is doing
+            activity = " ".join(str(payload["activity"]).split())[:160]
 
         recent_line = None
         if activity:
@@ -655,6 +681,220 @@ def pending_messages(session_id, name=None, ack=True):
         conn.close()
 
 
+# ---------------------------------------------------------------- task list
+TASK_STATUSES = ("pending", "running", "done", "blocked", "failed", "cancelled")
+TASK_STALE_SECS = 300    # a 'running' task whose runner went silent this long is retried
+
+
+def _config():
+    """Optional config.json next to this file: {"worker_cmd": [...], "kinds": [...]}.
+    Read on demand so an edit applies without a restart."""
+    path = os.environ.get("OFFICE_CONFIG") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "config.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            cfg = json.load(f)
+        return cfg if isinstance(cfg, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _task_id(value):
+    """Accept 12, "12" or "T-12"."""
+    try:
+        return int(str(value).strip().upper().replace("T-", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def _task_shape(r):
+    r = dict(r)
+    for key, empty in (("deps", []), ("result", None)):
+        try:
+            r[key] = json.loads(r[key]) if r.get(key) else empty
+        except (ValueError, TypeError):
+            r[key] = empty
+    r["ref"] = "T-%d" % r["id"]
+    return r
+
+
+def tasks_list(payload=None):
+    """Every open task, plus the ones that finished in the last week."""
+    conn = _db()
+    try:
+        rows = conn.execute(
+            "SELECT *, CAST((julianday('now')-julianday(updated_at))*86400 AS INTEGER)"
+            " AS age_secs FROM tasks WHERE status IN ('pending','running','blocked',"
+            "'failed') OR julianday('now')-julianday(updated_at) < 7 ORDER BY id"
+        ).fetchall()
+    finally:
+        conn.close()
+    tasks = [_task_shape(r) for r in rows]
+    counts = {s: 0 for s in TASK_STATUSES}
+    for t in tasks:
+        counts[t["status"]] = counts.get(t["status"], 0) + 1
+    runner = _RUNNER.get("proc")
+    return {"tasks": tasks, "counts": counts,
+            "runner_active": bool(runner and runner.poll() is None),
+            "can_run": os.environ.get("OFFICE_ALLOW_SPAWN") == "1",
+            "kinds": _config().get("kinds") or []}
+
+
+def task_add(payload):
+    title = " ".join((payload.get("title") or "").split())
+    if not title:
+        return {"ok": False, "error": "a task needs a title"}
+    deps = []
+    for d in payload.get("deps") or []:
+        tid = _task_id(d)
+        if tid is None:
+            return {"ok": False, "error": "bad dependency: %r" % d}
+        deps.append(tid)
+    try:
+        max_attempts = max(1, min(int(payload.get("max_attempts") or 2), 5))
+    except (TypeError, ValueError):
+        max_attempts = 2
+    conn = _db()
+    try:
+        with conn:
+            cur = conn.execute(
+                "INSERT INTO tasks (title, body, dir, kind, deps, max_attempts,"
+                " created_by) VALUES (?,?,?,?,?,?,?)",
+                (title[:200], (payload.get("body") or "").strip()[:8000],
+                 (payload.get("dir") or "").strip() or None,
+                 (payload.get("kind") or "default").strip()[:40] or "default",
+                 json.dumps(deps), max_attempts,
+                 (payload.get("created_by") or "operator")[:80]))
+        row = conn.execute("SELECT * FROM tasks WHERE id=?", (cur.lastrowid,)).fetchone()
+        return {"ok": True, "task": _task_shape(row)}
+    finally:
+        conn.close()
+
+
+def task_claim(payload):
+    """Hand the next ready task to a runner, atomically: no two runners get the same
+    one. Along the way the queue settles itself, so it cannot spin on work that can
+    never run: a task out of attempts fails, a task whose dependency did not finish is
+    blocked, and a task left 'running' by a runner that went silent is put back."""
+    owner = (payload.get("owner") or "runner")[:80]
+    conn = _db()
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE tasks SET status='pending', owner=NULL, updated_at=datetime('now'),"
+            " summary='the runner stopped responding; queued again'"
+            " WHERE status='running'"
+            " AND (julianday('now')-julianday(updated_at))*86400 > ?",
+            (TASK_STALE_SECS,))
+        status = {r["id"]: r["status"] for r in conn.execute("SELECT id, status FROM tasks")}
+        claimed = None
+        for r in conn.execute("SELECT * FROM tasks WHERE status='pending' ORDER BY id").fetchall():
+            t = _task_shape(r)
+            if t["attempts"] >= t["max_attempts"]:
+                conn.execute("UPDATE tasks SET status='failed', finished_at=datetime('now'),"
+                             " updated_at=datetime('now'), summary=? WHERE id=?",
+                             ("out of attempts (%d)" % t["max_attempts"], t["id"]))
+                status[t["id"]] = "failed"
+                continue
+            dep_states = [status.get(d) for d in t["deps"]]
+            if any(s in ("failed", "blocked", "cancelled", None) for s in dep_states):
+                conn.execute("UPDATE tasks SET status='blocked', finished_at=datetime('now'),"
+                             " updated_at=datetime('now'), summary=? WHERE id=?",
+                             ("a task it depends on did not finish", t["id"]))
+                status[t["id"]] = "blocked"
+                continue
+            if all(s == "done" for s in dep_states):
+                conn.execute("UPDATE tasks SET status='running', owner=?, attempts=attempts+1,"
+                             " started_at=datetime('now'), updated_at=datetime('now'),"
+                             " finished_at=NULL WHERE id=?", (owner, t["id"]))
+                claimed = t["id"]
+                break
+        conn.execute("COMMIT")
+        if claimed is None:
+            return {"ok": True, "task": None}
+        row = conn.execute("SELECT * FROM tasks WHERE id=?", (claimed,)).fetchone()
+        return {"ok": True, "task": _task_shape(row)}
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def task_update(payload):
+    """Record what happened to a task. {id, status?, summary?, result?, touch?, retry?}
+    `touch` is the runner's heartbeat. `retry` puts a task back in the queue with a
+    fresh attempt budget (the board's Retry button)."""
+    tid = _task_id(payload.get("id"))
+    if tid is None:
+        return {"ok": False, "error": "missing task id"}
+    conn = _db()
+    try:
+        row = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+        if row is None:
+            return {"ok": False, "error": "no task T-%d" % tid}
+        sets, vals = ["updated_at=datetime('now')"], []
+        if payload.get("retry"):
+            sets += ["status='pending'", "attempts=0", "owner=NULL", "finished_at=NULL"]
+        elif payload.get("status"):
+            st = payload["status"]
+            if st not in TASK_STATUSES:
+                return {"ok": False, "error": "status must be one of %s"
+                        % ", ".join(TASK_STATUSES)}
+            sets.append("status=?")
+            vals.append(st)
+            if st in ("done", "blocked", "failed", "cancelled"):
+                sets.append("finished_at=datetime('now')")
+            if st == "pending":
+                sets.append("owner=NULL")
+                if payload.get("refund_attempt"):
+                    # "not now" (quota wait, engine busy) is not a failed attempt
+                    sets.append("attempts=MAX(attempts-1, 0)")
+        if payload.get("summary") is not None:
+            sets.append("summary=?")
+            vals.append(str(payload["summary"])[:2000])
+        if payload.get("result") is not None:
+            sets.append("result=?")
+            vals.append(json.dumps(payload["result"], ensure_ascii=False)[:20000])
+        with conn:
+            conn.execute("UPDATE tasks SET %s WHERE id=?" % ", ".join(sets),
+                         tuple(vals) + (tid,))
+        row = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+        return {"ok": True, "task": _task_shape(row)}
+    finally:
+        conn.close()
+
+
+_RUNNER = {"proc": None}
+
+
+def tasks_run(payload):
+    """Start the task runner (runner.py) in the background if it is not already going.
+    It works through the ready tasks and exits. Under the same switch as new agents,
+    because it starts Claude sessions."""
+    if os.environ.get("OFFICE_ALLOW_SPAWN") != "1":
+        return {"ok": False, "error": "running tasks is off. Start office.py with "
+                "--allow-spawn to turn it on."}
+    proc = _RUNNER.get("proc")
+    if proc and proc.poll() is None:
+        return {"ok": True, "already_running": True}
+    here = os.path.dirname(os.path.abspath(__file__))
+    env = {k: v for k, v in os.environ.items() if k not in _SESSION_ENV}
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        _RUNNER["proc"] = subprocess.Popen(
+            [sys.executable, os.path.join(here, "runner.py")], cwd=here, env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, creationflags=flags)
+    except OSError as e:
+        return {"ok": False, "error": "could not start the runner: %s" % e}
+    return {"ok": True, "already_running": False}
+
+
 # ---------------------------------------------------------------- new agent
 _SESSION_ENV = {
     "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
@@ -749,6 +989,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, _read_page(), "text/html; charset=utf-8")
         if path == "/api/agents":
             return self._send(200, board(), "application/json; charset=utf-8")
+        if path == "/api/tasks":
+            return self._send(200, tasks_list(), "application/json; charset=utf-8")
         if path == "/api/conversation":
             q = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
             target = (q.get("target") or q.get("session") or [""])[0]
@@ -767,6 +1009,10 @@ class Handler(BaseHTTPRequestHandler):
             "/api/messages": send_message,
             "/api/spawn": spawn_agent,
             "/api/team": team,
+            "/api/tasks": task_add,
+            "/api/tasks/claim": task_claim,
+            "/api/tasks/update": task_update,
+            "/api/tasks/run": tasks_run,
             "/api/messages/pending": lambda p: {
                 "messages": pending_messages(p.get("session_id"), p.get("name"))},
         }
