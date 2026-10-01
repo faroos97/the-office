@@ -203,6 +203,8 @@ def _db():
     have = {r["name"] for r in conn.execute("PRAGMA table_info(agents)")}
     if "transcript_path" not in have:
         conn.execute("ALTER TABLE agents ADD COLUMN transcript_path TEXT")
+    if "roster_sig" not in have:
+        conn.execute("ALTER TABLE agents ADD COLUMN roster_sig TEXT")
     return conn
 
 
@@ -494,6 +496,90 @@ def conversation(target, limit=CONVO_MAX_MSGS):
     return head
 
 
+# ---------------------------------------------------------------- team awareness
+_STATE_WORDS = {
+    "working": "working now",
+    "blocked": "mid-turn, waiting on the user for a permission",
+    "waiting": "idle at its prompt",
+    "idle": "idle",
+}
+
+
+def _others(conn, me):
+    """Every agent except `me`, with the same staleness rule as the board."""
+    rows = conn.execute(
+        "SELECT *, CAST((julianday('now')-julianday(updated_at))*86400 AS INTEGER)"
+        " AS age_secs FROM agents WHERE session_id != ? ORDER BY updated_at DESC",
+        (me or "",)).fetchall()
+    out = []
+    for r in rows:
+        r = dict(r)
+        if (r.get("state") or "working") == "working" and \
+                (r.get("age_secs") or 0) > STALE_WORKING_SECS:
+            r["state"] = "idle"
+        out.append(r)
+    return out
+
+
+def _last_user_line(path, max_chars=140):
+    """The start of the most recent thing the user asked that session: what it is
+    really on, in the user's own words."""
+    if not path or not os.path.exists(path):
+        return None
+    try:
+        lines = _tail_lines(path, 400000)
+    except OSError:
+        return None
+    for ln in reversed(lines):
+        if '"user"' not in ln:
+            continue
+        try:
+            m = _entry_to_message(json.loads(ln))
+        except ValueError:
+            continue
+        if m and m["role"] == "user" and m["text"]:
+            one = " ".join(m["text"].split())
+            return one[:max_chars] + ("…" if len(one) > max_chars else "")
+    return None
+
+
+def team(payload):
+    """What one agent should know about the others, as text for its context.
+
+    Sent in full when `force` is set (session start). Otherwise only when the team
+    changed since this agent last saw it (someone arrived, left, or moved to a new
+    subject), so a session is not re-told the same roster on every prompt."""
+    me = (payload.get("session_id") or "").strip()
+    conn = _db()
+    try:
+        others = _others(conn, me)
+        sig = "|".join(sorted("%s:%s" % (r["session_id"][:8], r.get("task") or "")
+                              for r in others))
+        mine = conn.execute("SELECT roster_sig FROM agents WHERE session_id=?",
+                            (me,)).fetchone()
+        if not payload.get("force") and mine is not None and mine["roster_sig"] == sig:
+            return {"text": "", "changed": False, "count": len(others)}
+        if mine is not None:
+            with conn:
+                conn.execute("UPDATE agents SET roster_sig=? WHERE session_id=?",
+                             (sig, me))
+    finally:
+        conn.close()
+    if not others:
+        return {"text": "[The Office] No other agents are running right now.",
+                "changed": True, "count": 0}
+    lines = ["[The Office] Your teammates right now (other Claude Code agents working "
+             "for the same person):"]
+    for r in others:
+        line = "- [%s] %s | %s" % (r.get("name") or "?", r.get("task") or "(untitled)",
+                                   _STATE_WORDS.get(r["state"], r["state"]))
+        asked = _last_user_line(r.get("transcript_path"))
+        if asked:
+            line += ' | last asked: "%s"' % asked
+        lines.append(line)
+    return {"text": "\n".join(lines), "changed": True, "count": len(others)}
+
+
 # ---------------------------------------------------------------- messaging
 def send_message(payload):
     """One agent leaves a message for another. `to` is a loose reference (folder name,
@@ -531,7 +617,17 @@ def send_message(payload):
                 " text) VALUES (?,?,?,?,?)",
                 (sender["session_id"] if sender else None, from_name,
                  to_session, to_name, text[:4000]))
-        return {"ok": True, "to": to_session or to_name}
+        # Tell the sender the truth about when this will be read. Only an agent that is
+        # mid-turn has a hook still to fire; one sitting at its prompt reads nothing
+        # until the user types there.
+        recipient = None
+        for r in _others(conn, None):
+            if r["session_id"] == to_session:
+                recipient = {"label": _label(r), "state": r["state"],
+                             "mid_turn": r["state"] in ("working", "blocked"),
+                             "cwd": r.get("cwd")}
+                break
+        return {"ok": True, "to": to_session or to_name, "recipient": recipient}
     finally:
         conn.close()
 
@@ -670,6 +766,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/agents/report": report,
             "/api/messages": send_message,
             "/api/spawn": spawn_agent,
+            "/api/team": team,
             "/api/messages/pending": lambda p: {
                 "messages": pending_messages(p.get("session_id"), p.get("name"))},
         }

@@ -8,8 +8,9 @@
     python agent.py new <directory> <task>    start a new agent (its own terminal) on a task
 
 <agent> is loose: its folder name, a few words of its title, or the start of its session
-id. A message is delivered into the other agent's context the next time it finishes a
-turn or receives a prompt. Standard library only; talks to office.py on localhost.
+id. A message reaches an agent that is mid-turn when that turn ends; an agent sitting
+idle at its prompt only sees it with its next prompt, and `tell` says which case it is.
+Standard library only; talks to office.py on localhost.
 """
 import json
 import os
@@ -83,8 +84,21 @@ def tell(target, text):
     if not r.get("ok"):
         print("error: %s" % r.get("error"))
         return 1
-    print("Message left. It reaches that agent when it next finishes a turn or "
-          "receives a prompt.")
+    rec = r.get("recipient")
+    if not rec:
+        print("Message left. That agent is not on the board right now; it gets the "
+              "message if it comes back.")
+    elif rec.get("mid_turn"):
+        print("Message left for %s. It is mid-turn and will read it when that turn "
+              "ends. Use `inbox --wait 300` if you need its answer to continue."
+              % rec.get("label"))
+    else:
+        print("Message left for %s, but it is IDLE at its prompt: this alone will not "
+              "wake it. To wake it now, send it the same request with your built-in "
+              "SendMessage tool (its name is in ListAgents and matches its title). "
+              "Without those tools, start a new agent with `new \"%s\" <task>` "
+              "instead of waiting."
+              % (rec.get("label"), rec.get("cwd") or "<its directory>"))
     return 0
 
 

@@ -1,3 +1,6 @@
+# Your own team rules (copy examples/team.md to team.md and edit)
+/team.md
+
 # The Office runtime state
 office.db
 office.db-wal

@@ -31,7 +31,11 @@ agent.py inbox --wait 300         wait for the reply
 agent.py new <directory> <task>   start a new agent, in its own terminal
 ```
 
-So the marketing agent that needs a demo page can check whether a dev agent is already on it, read what it has done, ask it, or start a new dev agent with the task. A message reaches the other agent when it finishes its turn (it reads it and keeps going) or with its next prompt.
+It also gets the roster itself: who each teammate is, whether it is working or idle, and the last thing you asked it. The roster is repeated only when it changes. With it come the team rules: reuse what a teammate already did instead of redoing it, ask the agent that owns an area instead of doing its work, start an agent where nobody is on it, and report back when something a teammate needs is done. You can add your own rules (which folder owns what) in a `team.md` file next to `hook.py`; see [`examples/team.md`](examples/team.md).
+
+So the marketing agent that needs a demo page checks whether a dev agent is already on it, reads what it has done, asks it, or starts a new dev agent with the task, without you telling it what the others are doing.
+
+A message reaches an agent that is mid-turn when that turn ends (it reads it and keeps going). An agent sitting idle at its prompt is not woken by `tell`, and `tell` says so. Recent Claude Code builds have their own `SendMessage` tool between sessions, which does wake an idle one, and the rules point agents to it.
 
 **+ New agent.** A button on the board opens a new terminal running Claude Code in the folder you pick, started on the task you type.
 
@@ -79,12 +83,15 @@ Hooks only apply to sessions started after you add them. Restart a terminal that
 - **Messages** are stored until the recipient's hook collects them. At the end of a turn the hook hands the message back to Claude as a reason to continue, at most once per turn, so two agents cannot keep each other running forever. `agent.py inbox --wait` lets an agent wait for an answer inside its own turn.
 - **New agents** are started with `claude "<task>"` in a new terminal window. The task is passed as one argument, never as shell text.
 
-One limit to know: a session that is already idle has no hook running, so a message for it waits until its next prompt. Its desk shows an unread badge in the meantime.
+- **Team awareness** is text the hook prints at session start and, when the roster changed, with a prompt. Claude Code adds that output to the session's context.
+
+One limit to know: a session that is already idle has no hook running, so a message left with `tell` waits until its next prompt (its desk shows an unread badge). Waking it takes Claude Code's own `SendMessage` tool, or a new agent.
 
 ## Privacy and safety
 
 - The server listens on `127.0.0.1` only.
 - The hook sends no prompt text unless you set `OFFICE_SEND_PROMPT=1` (first 400 characters, used as a title until Claude Code has titled the session).
+- The roster shows each agent the start of the last prompt you gave its teammates, read from their transcripts on your machine. Your own sessions see each other's work; nothing else does.
 - Conversations are read from disk by the local server when you, or one of your own agents, ask for them. Any program on your machine that can reach localhost can do the same, which is also true of the transcript files themselves.
 - Starting new sessions is off unless you pass `--allow-spawn`.
 
@@ -97,7 +104,8 @@ One limit to know: a session that is already idle has no hook running, so a mess
 | `OFFICE_DB` | `./office.db` | Where the SQLite file lives. |
 | `OFFICE_CLAUDE_BIN` | found on `PATH` | The `claude` executable used for new agents. |
 | `OFFICE_TERMINAL` | `x-terminal-emulator` | Terminal used for new agents on Linux. |
-| `OFFICE_BRIEF=0` | on | Do not tell sessions about the other agents at start. |
+| `OFFICE_BRIEF=0` | on | Do not tell sessions about the other agents. |
+| `OFFICE_TEAM_FILE` | `team.md` next to `hook.py` | Your own team rules, added to the briefing. |
 | `OFFICE_SEND_PROMPT=1` | off | Hook forwards the start of the prompt as a fallback title. |
 
 New agents are tested on Windows. The macOS and Linux launchers are written but have not been run yet; reports welcome.
