@@ -7,8 +7,12 @@
     python agent.py inbox [--wait SECONDS]    messages for you (optionally wait for one)
     python agent.py new <directory> <task>    start a new agent (its own terminal) on a task
     python agent.py task list                 the shared task list
-    python agent.py task add <directory> <title> [details] [--kind K] [--after T-1,T-2]
+    python agent.py task add <directory> <title> [details] [--kind K] [--after T-1,T-2] [--to <agent>]
     python agent.py task run                  start the runner that works through the list
+    python agent.py task done|blocked <id> <note>   close a task assigned to you
+    python agent.py task retry <id> [better instruction] | task cancel <id>
+    python agent.py manager start|stop|status the floor manager registers itself
+    python agent.py wait [--timeout 100]      sleep until something changes, then say what
 
 <agent> is loose: its folder name, a few words of its title, or the start of its session
 id. A message reaches an agent that is mid-turn when that turn ends; an agent sitting
@@ -167,18 +171,49 @@ def task(args):
         rest = list(args[1:])
         kind = _flag(rest, "--kind")
         after = _flag(rest, "--after")
+        to = _flag(rest, "--to")
         if len(rest) < 2:
-            print("usage: task add <directory> <title> [details] [--kind K] [--after T-1,T-2]")
+            print("usage: task add <directory> <title> [details] [--kind K] "
+                  "[--after T-1,T-2] [--to <agent>]")
             return 2
         r = _post("/api/tasks", {
             "dir": os.path.abspath(rest[0]), "title": rest[1],
-            "body": " ".join(rest[2:]), "kind": kind,
+            "body": " ".join(rest[2:]), "kind": kind, "to": to,
             "deps": [d for d in (after or "").split(",") if d.strip()],
-            "created_by": ME[:8] or "an agent"})
+            "created_by": ME or "an agent"})
         if not r.get("ok"):
             print("error: %s" % r.get("error"))
             return 1
-        print("Queued as %s." % r["task"]["ref"])
+        rec = r.get("recipient")
+        if not rec:
+            print("Queued as %s for the task runner (`task run` starts it)."
+                  % r["task"]["ref"])
+        elif rec.get("mid_turn"):
+            print("%s assigned to %s. It is mid-turn and gets the task when that turn "
+                  "ends." % (r["task"]["ref"], rec.get("label")))
+        else:
+            print("%s assigned to %s, but it is IDLE: it will not see the task until "
+                  "it is woken. Wake it with your built-in SendMessage tool (name in "
+                  "ListAgents), telling it to run `inbox`."
+                  % (r["task"]["ref"], rec.get("label")))
+        return 0
+    if sub in ("done", "blocked", "cancel", "retry") and len(args) >= 2:
+        note = " ".join(args[2:]).strip()
+        body = {"id": args[1]}
+        if sub == "retry":
+            body["retry"] = True
+            if note:
+                body["body_append"] = "Added on retry: " + note
+        else:
+            body["status"] = {"done": "done", "blocked": "blocked",
+                              "cancel": "cancelled"}[sub]
+            if note:
+                body["summary"] = note
+        r = _post("/api/tasks/update", body)
+        if not r.get("ok"):
+            print("error: %s" % r.get("error"))
+            return 1
+        print("%s is now %s." % (r["task"]["ref"], r["task"]["status"]))
         return 0
     if sub == "run":
         r = _post("/api/tasks/run", {})
@@ -189,8 +224,111 @@ def task(args):
               else "Runner started.")
         return 0
     print("usage: task list | task show <id> | task add <directory> <title> [details] "
-          "[--kind K] [--after T-1,T-2] | task run")
+          "[--kind K] [--after T-1,T-2] [--to <agent>] | task run | "
+          "task done <id> <summary> | task blocked <id> <why> | "
+          "task retry <id> [better instruction] | task cancel <id>")
     return 2
+
+
+def manager(args):
+    """Register (or step down as) the floor manager."""
+    action = args[0] if args else "status"
+    if action not in ("start", "stop", "status"):
+        print("usage: manager start | manager stop | manager status")
+        return 2
+    r = _post("/api/manager", {"action": action, "session_id": ME})
+    if not r.get("ok"):
+        print("error: %s" % r.get("error"))
+        return 1
+    if action == "start":
+        print("You are registered as the floor manager. The other agents are told.")
+    elif action == "stop":
+        print("No floor manager is registered now.")
+    else:
+        print("Floor manager: %s" % (r.get("label") or "none"))
+    return 0
+
+
+def _snapshot():
+    """What a manager watches: every task's status, every other agent's state."""
+    tasks = {str(t["id"]): {"status": t["status"], "title": t["title"],
+                            "summary": t.get("summary") or ""}
+             for t in _get("/api/tasks")["tasks"]}
+    agents = {a["session_id"]: {"state": a["state"],
+                                "label": "[%s] %s" % (a["name"], a.get("task") or "(untitled)"),
+                                "activity": a.get("activity") or ""}
+              for a in _get("/api/agents")["agents"]
+              if a["session_id"] != ME and not a["session_id"].startswith("task-")}
+    return {"tasks": tasks, "agents": agents}
+
+
+def _changes(old, new):
+    """Lines describing what happened between two snapshots."""
+    out = []
+    for tid, t in new["tasks"].items():
+        before = old["tasks"].get(tid)
+        if before is None:
+            line = "new task T-%s [%s] %s" % (tid, t["status"], t["title"])
+        elif before["status"] != t["status"]:
+            line = "T-%s %s: %s -> %s" % (tid, t["title"], before["status"], t["status"])
+        else:
+            continue
+        if t["status"] in ("done", "blocked", "failed") and t["summary"]:
+            line += " | " + t["summary"][:400]
+        out.append(line)
+    for sid, a in new["agents"].items():
+        before = old["agents"].get(sid)
+        if before is None:
+            out.append("agent arrived: %s" % a["label"])
+        elif before["state"] != a["state"] and a["state"] in ("waiting", "blocked", "idle"):
+            what = {"waiting": "finished its turn and is idle at its prompt",
+                    "blocked": "is waiting on the operator for a permission",
+                    "idle": "went quiet"}[a["state"]]
+            out.append("%s %s" % (a["label"], what))
+    for sid, a in old["agents"].items():
+        if sid not in new["agents"]:
+            out.append("agent left: %s" % a["label"])
+    return out
+
+
+def wait(timeout=100):
+    """Sleep until something changes in the office, then say what: a task changed
+    status, an agent finished its turn or needs the operator, an agent arrived or left,
+    a message came for you. This is how a manager stays on duty without burning turns.
+    The last state you saw is remembered between calls, so nothing is missed while you
+    were busy."""
+    import tempfile
+    state_file = os.path.join(tempfile.gettempdir(),
+                              "the-office-wait-%s.json" % (ME[:12] or "anon"))
+    try:
+        with open(state_file, encoding="utf-8") as f:
+            seen = json.load(f)
+    except (OSError, ValueError):
+        seen = None
+    deadline = time.time() + max(0, int(timeout))
+    while True:
+        now = _snapshot()
+        lines = _changes(seen, now) if seen else []
+        msgs = []
+        if ME:
+            msgs = _post("/api/messages/pending", {"session_id": ME}).get("messages") or []
+        if seen is None or lines or msgs:
+            with open(state_file, "w", encoding="utf-8") as f:
+                json.dump(now, f)
+            if seen is None:
+                print("Watching from now on: %d task(s), %d other agent(s). Call `wait` "
+                      "again to sleep until something changes."
+                      % (len(now["tasks"]), len(now["agents"])))
+            for line in lines:
+                print("- " + line)
+            for m in msgs:
+                print("- message from %s: %s" % (m.get("from_name") or "another agent",
+                                                 m.get("text") or ""))
+            return 0
+        if time.time() >= deadline:
+            print("Nothing changed in %ds." % int(timeout))
+            return 0
+        time.sleep(4)
 
 
 def new(directory, task):
@@ -221,13 +359,15 @@ def main(argv):
             return new(argv[2], " ".join(argv[3:]))
         if cmd == "task":
             return task(argv[2:])
+        if cmd == "manager":
+            return manager(argv[2:])
+        if cmd == "wait":
+            rest = list(argv[2:])
+            t = _flag(rest, "--timeout")
+            return wait(int(t) if t and t.isdigit() else 100)
         if cmd == "inbox":
-            wait = 0
-            if "--wait" in argv:
-                i = argv.index("--wait")
-                if len(argv) > i + 1 and argv[i + 1].isdigit():
-                    wait = int(argv[i + 1])
-            return inbox(wait)
+            secs = _flag(list(argv[2:]), "--wait")
+            return inbox(int(secs) if secs and secs.isdigit() else 0)
     except OSError as e:
         print("The Office is not reachable at %s (%s). Is office.py running?"
               % (BASE, e))

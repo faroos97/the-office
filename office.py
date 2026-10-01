@@ -212,6 +212,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   started_at TEXT, finished_at TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_tasks_status ON tasks(status);
+
+-- Small key/value facts about the office itself (who the floor manager is).
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
 
 
@@ -371,8 +374,11 @@ def board():
         pend = conn.execute(
             "SELECT to_session, to_name, COUNT(*) c FROM messages"
             " WHERE delivered=0 GROUP BY to_session, to_name").fetchall()
+        boss = _manager_sid(conn)
     finally:
         conn.close()
+    for a in agents:
+        a["is_manager"] = a["session_id"] == boss
     by_sid, by_name = {}, {}
     for r in pend:
         if r["to_session"]:
@@ -385,7 +391,9 @@ def board():
     return {"agents": agents,
             "buckets": {"needs_you": needs, "working": work, "idle": idle},
             "counts": {"total": len(agents), "needs_you": len(needs),
-                       "working": len(work), "idle": len(idle)}}
+                       "working": len(work), "idle": len(idle)},
+            "manager": boss, "manager_dir": _config().get("manager_dir") or "",
+            "can_spawn": os.environ.get("OFFICE_ALLOW_SPAWN") == "1"}
 
 
 # ---------------------------------------------------------------- finding an agent
@@ -547,6 +555,47 @@ def _others(conn, me):
     return out
 
 
+def _manager_sid(conn):
+    """Session id of the floor manager, if one registered and is still on the board."""
+    row = conn.execute("SELECT value FROM meta WHERE key='manager'").fetchone()
+    if not row or not row["value"]:
+        return None
+    alive = conn.execute("SELECT 1 FROM agents WHERE session_id=?",
+                         (row["value"],)).fetchone()
+    return row["value"] if alive else None
+
+
+def manager(payload):
+    """The floor manager registers itself here (`agent.py manager start`), so the board
+    can mark its desk and the other agents know who hands out the work."""
+    action = payload.get("action") or "status"
+    sid = (payload.get("session_id") or "").strip()
+    conn = _db()
+    try:
+        current = _manager_sid(conn)
+        if action == "start":
+            if not sid:
+                return {"ok": False, "error": "no session id (CLAUDE_CODE_SESSION_ID)"}
+            if current and current != sid:
+                other = _resolve(conn, current)
+                return {"ok": False, "error": "there is already a floor manager: %s. "
+                        "Work with it, or have the operator stop it first." % _label(other)}
+            with conn:
+                conn.execute("INSERT INTO meta (key, value) VALUES ('manager', ?)"
+                             " ON CONFLICT(key) DO UPDATE SET value=excluded.value", (sid,))
+            return {"ok": True, "manager": sid}
+        if action == "stop":
+            if current and sid and current != sid:
+                return {"ok": False, "error": "you are not the floor manager"}
+            with conn:
+                conn.execute("DELETE FROM meta WHERE key='manager'")
+            return {"ok": True, "manager": None}
+        return {"ok": True, "manager": current,
+                "label": _label(_resolve(conn, current)) if current else None}
+    finally:
+        conn.close()
+
+
 def _last_user_line(path, max_chars=140):
     """The start of the most recent thing the user asked that session: what it is
     really on, in the user's own words."""
@@ -579,8 +628,9 @@ def team(payload):
     conn = _db()
     try:
         others = _others(conn, me)
+        boss = _manager_sid(conn)
         sig = "|".join(sorted("%s:%s" % (r["session_id"][:8], r.get("task") or "")
-                              for r in others))
+                              for r in others)) + "|mgr:" + (boss or "")[:8]
         mine = conn.execute("SELECT roster_sig FROM agents WHERE session_id=?",
                             (me,)).fetchone()
         if not payload.get("force") and mine is not None and mine["roster_sig"] == sig:
@@ -599,10 +649,18 @@ def team(payload):
     for r in others:
         line = "- [%s] %s | %s" % (r.get("name") or "?", r.get("task") or "(untitled)",
                                    _STATE_WORDS.get(r["state"], r["state"]))
+        if r["session_id"] == boss:
+            line += " | FLOOR MANAGER"
         asked = _last_user_line(r.get("transcript_path"))
         if asked:
             line += ' | last asked: "%s"' % asked
         lines.append(line)
+    if boss and boss != me:
+        lines.append(
+            "There is a floor manager (marked above). It hands out the work and keeps "
+            "the task list. Tell it when you finish something it gave you or when you "
+            "are blocked on something outside your area; if it assigned you a task, "
+            "close it with `task done` or `task blocked`.")
     return {"text": "\n".join(lines), "changed": True, "count": len(others)}
 
 
@@ -682,7 +740,9 @@ def pending_messages(session_id, name=None, ack=True):
 
 
 # ---------------------------------------------------------------- task list
-TASK_STATUSES = ("pending", "running", "done", "blocked", "failed", "cancelled")
+# pending = waiting for the runner; assigned = given to a live agent, which closes it
+TASK_STATUSES = ("pending", "assigned", "running", "done", "blocked", "failed",
+                 "cancelled")
 TASK_STALE_SECS = 300    # a 'running' task whose runner went silent this long is retried
 
 
@@ -691,12 +751,18 @@ def _config():
     Read on demand so an edit applies without a restart."""
     path = os.environ.get("OFFICE_CONFIG") or os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "config.json")
+    if not os.path.exists(path):
+        return {}
     try:
         with open(path, encoding="utf-8") as f:
             cfg = json.load(f)
-        return cfg if isinstance(cfg, dict) else {}
-    except (OSError, ValueError):
-        return {}
+        if not isinstance(cfg, dict):
+            raise ValueError("it must be a JSON object")
+        return cfg
+    except (OSError, ValueError) as e:
+        # A config that exists but cannot be read must not be ignored: the runner would
+        # quietly fall back to the default worker, which is not what was configured.
+        return {"_error": "config.json is not valid (%s). Fix it or remove it." % e}
 
 
 def _task_id(value):
@@ -724,8 +790,8 @@ def tasks_list(payload=None):
     try:
         rows = conn.execute(
             "SELECT *, CAST((julianday('now')-julianday(updated_at))*86400 AS INTEGER)"
-            " AS age_secs FROM tasks WHERE status IN ('pending','running','blocked',"
-            "'failed') OR julianday('now')-julianday(updated_at) < 7 ORDER BY id"
+            " AS age_secs FROM tasks WHERE status IN ('pending','assigned','running',"
+            "'blocked','failed') OR julianday('now')-julianday(updated_at) < 7 ORDER BY id"
         ).fetchall()
     finally:
         conn.close()
@@ -737,7 +803,8 @@ def tasks_list(payload=None):
     return {"tasks": tasks, "counts": counts,
             "runner_active": bool(runner and runner.poll() is None),
             "can_run": os.environ.get("OFFICE_ALLOW_SPAWN") == "1",
-            "kinds": _config().get("kinds") or []}
+            "kinds": _config().get("kinds") or [],
+            "config_error": _config().get("_error")}
 
 
 def task_add(payload):
@@ -754,19 +821,48 @@ def task_add(payload):
         max_attempts = max(1, min(int(payload.get("max_attempts") or 2), 5))
     except (TypeError, ValueError):
         max_attempts = 2
+    body = (payload.get("body") or "").strip()[:8000]
+    creator = (payload.get("created_by") or "operator")[:80]
     conn = _db()
     try:
+        # `to` gives the task to a live agent instead of the runner: it is told about it
+        # and closes it itself with `agent.py task done`.
+        agent = None
+        if payload.get("to"):
+            agent = _resolve(conn, payload["to"])
+            if not agent:
+                return {"ok": False, "error": "no agent matches %r" % payload["to"]}
         with conn:
             cur = conn.execute(
                 "INSERT INTO tasks (title, body, dir, kind, deps, max_attempts,"
-                " created_by) VALUES (?,?,?,?,?,?,?)",
-                (title[:200], (payload.get("body") or "").strip()[:8000],
-                 (payload.get("dir") or "").strip() or None,
+                " created_by, status, owner) VALUES (?,?,?,?,?,?,?,?,?)",
+                (title[:200], body,
+                 (payload.get("dir") or "").strip() or (agent or {}).get("cwd"),
                  (payload.get("kind") or "default").strip()[:40] or "default",
-                 json.dumps(deps), max_attempts,
-                 (payload.get("created_by") or "operator")[:80]))
-        row = conn.execute("SELECT * FROM tasks WHERE id=?", (cur.lastrowid,)).fetchone()
-        return {"ok": True, "task": _task_shape(row)}
+                 json.dumps(deps), max_attempts, creator,
+                 "assigned" if agent else "pending",
+                 agent["session_id"] if agent else None))
+            tid = cur.lastrowid
+            recipient = None
+            if agent:
+                sender = _resolve(conn, creator) if creator != "operator" else None
+                conn.execute(
+                    "INSERT INTO messages (from_session, from_name, to_session, text)"
+                    " VALUES (?,?,?,?)",
+                    (sender["session_id"] if sender else None,
+                     _label(sender) or "the operator", agent["session_id"],
+                     "Task T-%d is assigned to you: %s%s\nWhen it is finished run "
+                     "`task done T-%d <what you did and where>`. If you cannot finish "
+                     "it run `task blocked T-%d <why>`."
+                     % (tid, title, ("\n" + body) if body else "", tid, tid)))
+                state = "working"
+                for r in _others(conn, None):
+                    if r["session_id"] == agent["session_id"]:
+                        state = r["state"]
+                recipient = {"label": _label(agent), "state": state,
+                             "mid_turn": state in ("working", "blocked")}
+        row = conn.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+        return {"ok": True, "task": _task_shape(row), "recipient": recipient}
     finally:
         conn.close()
 
@@ -838,6 +934,11 @@ def task_update(payload):
         if row is None:
             return {"ok": False, "error": "no task T-%d" % tid}
         sets, vals = ["updated_at=datetime('now')"], []
+        if payload.get("body_append"):
+            # a retry usually comes with a better instruction
+            sets.append("body=?")
+            vals.append(((row["body"] or "") + "\n\n" +
+                         str(payload["body_append"]).strip())[:8000].strip())
         if payload.get("retry"):
             sets += ["status='pending'", "attempts=0", "owner=NULL", "finished_at=NULL"]
         elif payload.get("status"):
@@ -879,6 +980,8 @@ def tasks_run(payload):
     if os.environ.get("OFFICE_ALLOW_SPAWN") != "1":
         return {"ok": False, "error": "running tasks is off. Start office.py with "
                 "--allow-spawn to turn it on."}
+    if _config().get("_error"):
+        return {"ok": False, "error": _config()["_error"]}
     proc = _RUNNER.get("proc")
     if proc and proc.poll() is None:
         return {"ok": True, "already_running": True}
@@ -934,9 +1037,30 @@ def spawn_agent(payload):
     cwd = os.path.expanduser((payload.get("cwd") or "").strip() or "~")
     if not os.path.isdir(cwd):
         return {"ok": False, "error": "directory not found: %s" % cwd}
+    cfg = _config()
+    if cfg.get("_error"):
+        return {"ok": False, "error": cfg["_error"]}
+    extra = cfg.get("agent_args") or []
+    if payload.get("role") == "manager":
+        # the floor manager: its rulebook is manager.md, its goal comes from the operator
+        conn = _db()
+        try:
+            if _manager_sid(conn):
+                return {"ok": False, "error": "a floor manager is already running"}
+        finally:
+            conn.close()
+        here = os.path.dirname(os.path.abspath(__file__)).replace("\\", "/")
+        goal = " ".join((payload.get("task") or "").split())
+        payload = dict(payload, task=(
+            "You are the floor manager for this team of agents. Read the file "
+            "%s/manager.md now and follow it exactly. %s"
+            % (here, ("The operator's goal for this session: " + goal) if goal else
+               "The operator gave no specific goal: work from the task list and the "
+               "team's priorities, and ask if the next step is not clear.")))
+        extra = cfg.get("manager_args") or extra
     # one line, no quotes: the task is passed as a single argument, never as shell text
     task = " ".join((payload.get("task") or "").split()).replace('"', "'")[:2000]
-    args = [_claude_bin()] + ([task] if task else [])
+    args = [_claude_bin()] + [str(a) for a in extra] + ([task] if task else [])
     # If office.py itself was started from inside a Claude Code session, its per-session
     # variables must not leak into the new agent (it would think it is a child session).
     env = {k: v for k, v in os.environ.items() if k not in _SESSION_ENV}
@@ -1009,6 +1133,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/messages": send_message,
             "/api/spawn": spawn_agent,
             "/api/team": team,
+            "/api/manager": manager,
             "/api/tasks": task_add,
             "/api/tasks/claim": task_claim,
             "/api/tasks/update": task_update,

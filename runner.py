@@ -67,13 +67,17 @@ def _post(path, obj, timeout=10):
 
 
 def _config():
+    """config.json, or {} when there is none. A file that exists but does not parse is
+    an error, never 'no config': falling back to the default worker would silently run
+    something other than what was configured."""
     path = os.environ.get("OFFICE_CONFIG") or os.path.join(HERE, "config.json")
-    try:
-        with open(path, encoding="utf-8") as f:
-            cfg = json.load(f)
-        return cfg if isinstance(cfg, dict) else {}
-    except (OSError, ValueError):
+    if not os.path.exists(path):
         return {}
+    with open(path, encoding="utf-8") as f:
+        cfg = json.load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError("config.json must be a JSON object")
+    return cfg
 
 
 def _clean_env():
@@ -251,6 +255,11 @@ def main():
     ap.add_argument("--max", type=int, default=10, help="tasks to run before exiting")
     ap.add_argument("--once", action="store_true", help="run a single task")
     args = ap.parse_args()
+    try:
+        _config()
+    except (OSError, ValueError) as e:
+        print("config.json is not valid (%s). Nothing was run." % e)
+        return 1
     owner = "runner-%d" % os.getpid()
     done = 0
     limit = 1 if args.once else max(1, args.max)

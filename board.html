@@ -101,6 +101,8 @@
   .pill{font-size:11px; font-weight:800; border-radius:999px; padding:1px 9px; white-space:nowrap; border:1px solid transparent}
   .pill.pending{background:var(--soft); border-color:var(--line); color:var(--muted)}
   .pill.running{background:var(--working); color:#fff}
+  .pill.assigned{background:var(--accent-bg); color:var(--accent)}
+  .trow.assigned{border-left-color:var(--accent)}
   .pill.done{background:transparent; border-color:var(--working); color:var(--working)}
   .pill.blocked,.pill.failed{background:var(--blocked); color:#fff}
   .pill.cancelled{background:transparent; border-color:var(--line); color:var(--muted)}
@@ -167,6 +169,7 @@
       <span class="chip"><span class="dot idle"></span><span id="c-idle">0</span> idle</span>
       <span class="updated" id="updated">connecting…</span>
       <button class="btn" id="mute">Sound: on</button>
+      <button class="btn" id="mgrbtn">Start manager</button>
       <button class="btn pri" id="newbtn">+ New agent</button>
     </div>
   </header>
@@ -195,13 +198,13 @@
 
   <div class="veil" id="veil">
     <form class="dialog" id="newform">
-      <h3>New agent</h3>
-      <p>Opens a new terminal running Claude Code in that folder, started on your task.</p>
+      <h3 id="n-h">New agent</h3>
+      <p id="n-p">Opens a new terminal running Claude Code in that folder, started on your task.</p>
       <label for="n-dir">Folder</label>
       <input id="n-dir" list="dirs" placeholder="C:\path\to\project" autocomplete="off" required>
       <datalist id="dirs"></datalist>
-      <label for="n-task">Task</label>
-      <textarea id="n-task" placeholder="What should this agent do?" required></textarea>
+      <label for="n-task" id="n-tl">Task</label>
+      <textarea id="n-task" placeholder="What should this agent do?"></textarea>
       <div class="row">
         <span id="n-msg"></span>
         <button type="button" class="btn" id="n-cancel">Cancel</button>
@@ -257,6 +260,7 @@
   function card(a){
     var st=a.state, folder=dept(a.cwd), meta=[];
     if(folder)meta.push('<span class="tag folder">'+esc(folder)+'</span>');
+    if(a.is_manager)meta.push('<span class="badge">floor manager</span>');
     if(a.last_tool)meta.push('<span class="tag">'+esc(a.last_tool)+'</span>');
     if(a.inbox>0)meta.push('<span class="badge" title="messages from other agents, not read yet">'+a.inbox+' unread from agents</span>');
     return '<button type="button" class="card '+st+(selected===a.session_id?' sel':'')+'" data-sid="'+esc(a.session_id)+'">'
@@ -268,6 +272,10 @@
   function render(d){
     $("offline").classList.remove("show");
     var b=d.buckets,c=d.counts; lastAgents=d.agents||[];
+    managerSid=d.manager||null; managerDir=d.manager_dir||"";
+    $("mgrbtn").textContent=managerSid?"Manager: on duty":"Start manager";
+    $("mgrbtn").style.display=(managerSid||d.can_spawn)?"":"none";
+    $("newbtn").style.display=d.can_spawn?"":"none";
     ["need","work","idle"].forEach(function(k,i){var v=[c.needs_you,c.working,c.idle][i];
       $("c-"+k).textContent=v;$("n-"+k).textContent=v;});
     var gn=$("g-need");
@@ -326,26 +334,38 @@
   $("d-close").onclick=closeConvo;
 
   /* ---- new agent ---- */
-  function openNew(){
+  var spawnRole="agent", managerSid=null, managerDir="";
+  function openNew(role){
+    spawnRole=role==="manager"?"manager":"agent";
+    var mgr=spawnRole==="manager";
     fillDirs();
-    if(!$("n-dir").value)$("n-dir").value=localStorage.getItem("office_lastdir")||"";
+    $("n-h").textContent=mgr?"Floor manager":"New agent";
+    $("n-p").textContent=mgr
+      ?"Starts a Claude Code session whose only job is to run the team: it keeps the task list, hands work to the runner and to agents, checks what comes back, and comes to you for decisions."
+      :"Opens a new terminal running Claude Code in that folder, started on your task.";
+    $("n-tl").textContent=mgr?"Goal for this session (optional)":"Task";
+    $("n-task").placeholder=mgr?"What should the team get done? Leave empty to work from the task list.":"What should this agent do?";
+    $("n-go").textContent=mgr?"Start manager":"Start agent";
+    $("n-dir").value=mgr?(managerDir||localStorage.getItem("office_mgrdir")||""):(localStorage.getItem("office_lastdir")||"");
     $("n-msg").textContent="";$("n-msg").className="";
     $("veil").classList.add("show");
     ($("n-dir").value?$("n-task"):$("n-dir")).focus();
   }
   function closeNew(){$("veil").classList.remove("show");}
-  $("newbtn").onclick=openNew;
+  $("newbtn").onclick=function(){openNew("agent");};
+  $("mgrbtn").onclick=function(){if(managerSid)openConvo(managerSid);else openNew("manager");};
   $("n-cancel").onclick=closeNew;
   $("veil").onclick=function(e){if(e.target===$("veil"))closeNew();};
   $("newform").onsubmit=function(e){
     e.preventDefault();
     var dir=$("n-dir").value.trim(), task=$("n-task").value.trim(), go=$("n-go"), msg=$("n-msg");
-    if(!dir||!task)return;
+    var mgr=spawnRole==="manager";
+    if(!dir||(!task&&!mgr))return;
     go.disabled=true;msg.className="";msg.textContent="Starting…";
-    fetch("/api/spawn",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({cwd:dir,task:task})})
+    fetch("/api/spawn",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({cwd:dir,task:task,role:spawnRole})})
       .then(function(r){return r.json();})
       .then(function(r){go.disabled=false;
-        if(r.ok){localStorage.setItem("office_lastdir",dir);$("n-task").value="";
+        if(r.ok){localStorage.setItem(mgr?"office_mgrdir":"office_lastdir",dir);$("n-task").value="";
           msg.className="ok";msg.textContent="Started. It appears on the board in a few seconds.";
           setTimeout(closeNew,1400);}
         else{msg.className="err";msg.textContent=r.error||"Could not start the agent.";}})
@@ -354,7 +374,7 @@
 
   /* ---- tasks ---- */
   var openTask={}, showDone=false, lastTasks=null;
-  var T_ORDER={blocked:0,failed:0,running:1,pending:2,done:3,cancelled:3};
+  var T_ORDER={blocked:0,failed:0,running:1,assigned:1,pending:2,done:3,cancelled:3};
   function list(title,items,cls){
     return items.length?'<h4>'+title+'</h4><ul'+(cls?' class="'+cls+'"':'')+'>'+items.map(function(x){return '<li>'+esc(x)+'</li>';}).join("")+'</ul>':'';
   }
@@ -389,8 +409,10 @@
     var live=ts.filter(function(t){return T_ORDER[t.status]<3;}), closed=ts.filter(function(t){return T_ORDER[t.status]===3;});
     var c=d.counts, need=(c.blocked||0)+(c.failed||0), parts=[];
     if(need)parts.push(need+" need you"); if(c.running)parts.push(c.running+" running");
+    if(c.assigned)parts.push(c.assigned+" with agents");
     if(c.pending)parts.push(c.pending+" queued"); if(c.done)parts.push(c.done+" done");
-    $("n-tasks").textContent=live.length; $("t-sum").textContent=parts.join(" · ");
+    $("n-tasks").textContent=live.length; $("t-sum").textContent=d.config_error||parts.join(" · ");
+    $("t-sum").style.color=d.config_error?"var(--blocked)":"";
     var html=live.map(taskRow).join("");
     if(closed.length){
       html+='<button type="button" class="tmore" id="t-more">'+(showDone?"Hide":"Show")+' finished ('+closed.length+')</button>';

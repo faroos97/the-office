@@ -91,6 +91,23 @@ Queued as T-5.
 
 By default the worker is a headless Claude Code session (`claude -p`) in the task's folder. If you already have your own engine, with planning, an independent review, model routing, plug it in with two lines of config (see [Your own worker](#your-own-worker)). The author runs it this way: a real run went plan, write, review, fix, second review, and came back blocked because the reviewer would not accept the result, with every finding listed on the board.
 
+### 7. A floor manager
+
+**Start manager** on the board opens a Claude Code session with one job: run the team. You give it a goal. It keeps the task list, hands file work to the runner and anything that needs a shell or a browser to a live agent, sleeps until something changes (`agent.py wait`), checks what comes back, retries what was unclear, and comes to you only for what is yours to decide: money, anything sent to a client or published, anything that cannot be undone, and whatever is blocked twice.
+
+Its rulebook is [`manager.md`](manager.md), a plain file you can edit. The other agents are told who the manager is, and close the tasks it assigns them with `task done` or `task blocked`.
+
+From a test run, the manager's own report after a small goal:
+
+```text
+The test run worked. One cheap task went through the task runner, passed review, and wrote the file.
+- Result: task T-2 is done. hello.md holds exactly one line. I checked the bytes myself: 27 bytes, no extra lines.
+- Nothing else touched: the only other file in that folder is dated this morning, so the earlier test left it, not this one.
+- Still running / needs you: nothing.
+```
+
+The task list is the memory, not the manager. When its session gets long it writes the state into the list and steps down, and a fresh manager carries on from there.
+
 ## Quick start
 
 1. Clone this repo.
@@ -171,6 +188,7 @@ Without a `config.json`, the built-in worker runs `claude -p` and you can pass i
 | `hook.py` | Runs on every Claude Code event. Reports it to the server, and prints the roster, the rules and any messages so Claude Code adds them to the session's context. |
 | `agent.py` | The tool agents use to see and reach each other, and to queue tasks. |
 | `runner.py` | Works through the task list: claims a ready task, runs the worker, records the outcome. |
+| `manager.md` | The floor manager's rulebook. |
 | `board.html` | The board. Polls the server every two seconds. |
 
 The parts worth knowing:
@@ -186,7 +204,18 @@ The parts worth knowing:
 ## What it costs, and what it cannot do
 
 - **Tokens.** The briefing a session receives at start is about 400 tokens, plus about 40 per teammate, plus your `team.md`. After that it only receives the roster again when the team changes. Agents that talk to each other spend what any Claude turn spends, on both sides.
-- **A worker is a full Claude Code session unless you slim it.** The built-in worker runs `claude -p` with your global settings, plugins and MCP servers. On the author's machine, which has many of them and a large default model, a one-word task cost $0.84. Pass a smaller model and fewer extras in `OFFICE_WORKER_ARGS`, or use your own worker.
+- **A session costs what its startup loads.** Every worker, agent and manager is a Claude Code session, and a session begins by loading your model, plugins, MCP servers and settings. Measured on the author's machine, which has a lot of them, for the same one-word task:
+
+  | Started with | Cost |
+  |---|---|
+  | the global defaults (largest model, everything loaded) | $0.84 |
+  | `--model sonnet` | $0.19 |
+  | `--model sonnet`, no MCP servers | $0.14 |
+  | `--model sonnet`, no MCP servers, no user settings | $0.018 |
+
+  So choose the model per role. In `config.json`, `agent_args` are added to every agent started from the board or with `agent.py new`, and `manager_args` to the manager, for example `"agent_args": ["--model", "sonnet"]`. The built-in task worker takes `OFFICE_WORKER_ARGS`.
+- **Two kinds of employee, on purpose.** A task-runner worker is headless: with a strict engine it may have no shell at all. Work that needs commands, a browser or back-and-forth goes to a live agent. The manager's rulebook makes that choice.
+- **Tasks run one after another.** The runner takes one task at a time. Live agents are what runs in parallel: each has its own terminal.
 - **An idle agent is not woken by `tell`.** A session sitting at its prompt has no hook running, so the message waits for its next prompt and its desk shows an unread badge. `tell` says so when it happens, so the sender does not wait for nothing. Recent Claude Code builds have their own `SendMessage` tool between sessions, which does wake an idle one, and the rules point agents to it. Otherwise the agent starts a new one.
 - **Only hooked sessions are on the team.** A session started in a project without the hook is invisible to the others. Put the hook in `~/.claude/settings.json` to cover everything.
 - **Tested on Windows.** The macOS and Linux launchers for new agents are written but have not been run. Everything else is plain Python. Reports are welcome.
@@ -204,7 +233,7 @@ The parts worth knowing:
 |---|---|---|
 | `--port` / `OFFICE_PORT` | `8787` | Port for the server, the hook and `agent.py`. |
 | `--allow-spawn` / `OFFICE_ALLOW_SPAWN=1` | off | Let the board and agents start new sessions and run tasks. |
-| `config.json` / `OFFICE_CONFIG` | none | Your own worker command and task kinds. |
+| `config.json` / `OFFICE_CONFIG` | none | `worker_cmd`, `kinds`, `agent_args`, `manager_args`, `manager_dir` (the folder the manager starts in). A file that does not parse stops the runner rather than being ignored. |
 | `OFFICE_WORKER_ARGS` | none | Extra arguments for the built-in `claude -p` worker. |
 | `OFFICE_WORKER_TIMEOUT` | `3600` | Seconds before a worker is stopped. |
 | `OFFICE_TEAM_FILE` | `team.md` next to `hook.py` | Your own team rules. |
