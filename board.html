@@ -148,7 +148,7 @@
   .dialog h3{margin:0 0 4px; font-size:18px; font-weight:800}
   .dialog p{margin:0 0 14px; color:var(--muted); font-size:13px; font-weight:600}
   .dialog label{display:block; font-size:12px; font-weight:800; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); margin:12px 0 5px}
-  .dialog input,.dialog textarea{width:100%; font:inherit; font-size:14px; color:var(--ink); background:var(--bg);
+  .dialog input,.dialog textarea,.dialog select{width:100%; font:inherit; font-size:14px; color:var(--ink); background:var(--bg);
     border:1px solid var(--line); border-radius:9px; padding:9px 11px}
   .dialog textarea{resize:vertical; min-height:96px}
   .dialog .row{display:flex; gap:10px; justify-content:flex-end; margin-top:16px; align-items:center}
@@ -226,6 +226,10 @@
       <label for="k-kind">Kind</label>
       <input id="k-kind" list="kinds" placeholder="default" autocomplete="off">
       <datalist id="kinds"></datalist>
+      <div id="k-checkwrap" style="display:none">
+        <label for="k-check">Check to run afterwards</label>
+        <select id="k-check"></select>
+      </div>
       <div class="row">
         <span id="k-msg"></span>
         <button type="button" class="btn" id="k-cancel">Cancel</button>
@@ -382,9 +386,12 @@
     var res=t.result||{}, meta=[], det='', acts='';
     if(t.dir)meta.push('<span class="tag folder">'+esc(dept(t.dir))+'</span>');
     if(t.kind&&t.kind!=="default")meta.push('<span class="tag">'+esc(t.kind)+'</span>');
+    if(t.check_name)meta.push('<span class="tag">check: '+esc(t.check_name)+'</span>');
     var deps=(t.deps||[]).length?' · after '+t.deps.map(function(d){return "T-"+d;}).join(", "):'';
     if(t.body)det+='<h4>What to do</h4><div class="pre">'+esc(t.body)+'</div>';
     if(t.summary)det+='<h4>Outcome</h4><div class="pre">'+esc(t.summary)+'</div>';
+    if(res.check)det+='<h4>Check '+esc(res.check.name)+': '+(res.check.ok?'passed':(res.check.exit===null?'could not run':'failed, exit '+res.check.exit))+'</h4>'
+      +(res.check.output?'<div class="pre">'+esc(res.check.output)+'</div>':'');
     det+=list("Findings",res.unresolved_findings||res.findings||[]);
     det+=list("Files",res.artifact_paths||res.artifacts||[],"mono");
     if(res.run_dir)det+='<h4>Run folder</h4><div class="mono">'+esc(res.run_dir)+'</div>';
@@ -411,6 +418,7 @@
     if(need)parts.push(need+" need you"); if(c.running)parts.push(c.running+" running");
     if(c.assigned)parts.push(c.assigned+" with agents");
     if(c.pending)parts.push(c.pending+" queued"); if(c.done)parts.push(c.done+" done");
+    if(d.parallel>1&&(c.pending||c.running))parts.push("up to "+d.parallel+" at a time");
     $("n-tasks").textContent=live.length; $("t-sum").textContent=d.config_error||parts.join(" · ");
     $("t-sum").style.color=d.config_error?"var(--blocked)":"";
     var html=live.map(taskRow).join("");
@@ -423,6 +431,12 @@
     var run=$("t-run"); run.style.display=d.can_run?"":"none";
     run.disabled=d.runner_active||!c.pending; run.textContent=d.runner_active?"Runner working…":"Run tasks";
     $("kinds").innerHTML=(d.kinds||[]).map(function(k){return '<option value="'+esc(k)+'">';}).join("");
+    var cks=d.checks||[], sel=$("k-check");
+    if(sel.getAttribute("data-have")!==cks.join("|")){
+      sel.setAttribute("data-have",cks.join("|"));
+      sel.innerHTML='<option value="">none</option>'+cks.map(function(k){return '<option value="'+esc(k)+'">'+esc(k)+'</option>';}).join("");
+    }
+    $("k-checkwrap").style.display=cks.length?"":"none";
     document.querySelectorAll(".trow").forEach(function(el){
       el.onclick=function(){var id=el.getAttribute("data-tid");openTask[id]=!openTask[id];el.classList.toggle("open",!!openTask[id]);};
       el.onkeydown=function(e){if(e.key==="Enter"&&e.target===el)el.onclick();};
@@ -452,10 +466,10 @@
     var title=$("k-title").value.trim(), go=$("k-go"), msg=$("k-msg"); if(!title)return;
     go.disabled=true;
     fetch("/api/tasks",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({
-        title:title,dir:$("k-dir").value.trim(),body:$("k-body").value.trim(),kind:$("k-kind").value.trim(),created_by:"operator"})})
+        title:title,dir:$("k-dir").value.trim(),body:$("k-body").value.trim(),kind:$("k-kind").value.trim(),check:$("k-check").value,created_by:"operator"})})
       .then(function(r){return r.json();})
       .then(function(r){go.disabled=false;
-        if(r.ok){$("k-title").value="";$("k-body").value="";closeTask();tickTasks();}
+        if(r.ok){$("k-title").value="";$("k-body").value="";$("k-check").value="";closeTask();tickTasks();}
         else{msg.className="err";msg.textContent=r.error||"Could not add the task.";}})
       .catch(function(){go.disabled=false;msg.className="err";msg.textContent="The Office server did not answer.";});
   };

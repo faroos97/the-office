@@ -89,6 +89,22 @@ $ agent.py task add ./webapp "Review the pricing page" --after T-4
 Queued as T-5.
 ```
 
+**Several at once, without collisions.** Set `"parallel": 3` in `config.json` and the runner keeps three workers busy. The list never hands out a task while another one is running in the same folder, or in a folder above or below it. Tasks in `webapp/pricing` and `webapp/blog` run together; two tasks in `webapp` take turns. No worktrees, no merge step: the folder is the lock.
+
+**Checks: proof instead of a worker's word.** A headless worker may have no shell, so it cannot know that the tests pass. Define the commands that prove things in `config.json`, and let a task name one:
+
+```json
+{ "parallel": 3,
+  "checks": { "tests": "python -m unittest discover -s tests",
+              "build": "npm run build" } }
+```
+
+```text
+$ agent.py task add ./api "Add the refund endpoint" "..." --check tests
+```
+
+When the worker says done, the runner runs the check in the task's folder. Exit code 0 and the task is done. Anything else and the task goes back to a worker with the command's output, until it is out of attempts; then it is blocked, with the output on the board. A task can only pick a check by name. The commands live in your config, so an agent that queues work cannot make the runner execute something you did not write.
+
 By default the worker is a headless Claude Code session (`claude -p`) in the task's folder. If you already have your own engine, with planning, an independent review, model routing, plug it in with two lines of config (see [Your own worker](#your-own-worker)). The author runs it this way: a real run went plan, write, review, fix, second review, and came back blocked because the reviewer would not accept the result, with every finding listed on the board.
 
 ### 7. A floor manager
@@ -177,6 +193,7 @@ Create `config.json` next to `office.py`:
 - Progress is optional, one line on stderr each time: `##office activity: reviewing`. It shows on the worker's desk.
 - The outcome is the last such line on stdout: `##office result: {"status": "done", "summary": "..."}`. Status is `done`, `blocked` (a person has to look), `failed`, or `pending` (not now, try later, no attempt spent). Anything else in the object is kept as the receipt; `artifact_paths`, `unresolved_findings` and `run_dir` are displayed.
 - With no result line, exit code 0 means done.
+- With `"parallel"` above 1, several copies of your worker run at the same time, each on a task in a different folder. If yours cannot start right now, answer `pending`.
 
 Without a `config.json`, the built-in worker runs `claude -p` and you can pass it extra arguments, such as a model or a permission mode, in `OFFICE_WORKER_ARGS`.
 
@@ -187,7 +204,7 @@ Without a `config.json`, the built-in worker runs `claude -p` and you can pass i
 | `office.py` | The server. Keeps one row per session in SQLite, serves the board, reads conversations, stores messages, starts new agents. |
 | `hook.py` | Runs on every Claude Code event. Reports it to the server, and prints the roster, the rules and any messages so Claude Code adds them to the session's context. |
 | `agent.py` | The tool agents use to see and reach each other, and to queue tasks. |
-| `runner.py` | Works through the task list: claims a ready task, runs the worker, records the outcome. |
+| `runner.py` | Works through the task list: claims ready tasks, runs a worker for each, runs the task's check, records the outcome. |
 | `manager.md` | The floor manager's rulebook. |
 | `board.html` | The board. Polls the server every two seconds. |
 
@@ -198,7 +215,7 @@ The parts worth knowing:
 - **Presence** needs no cleanup. A session that goes silent while working turns idle after two minutes and leaves the board after an hour. A clean exit removes it at once.
 - **Messages** wait in the server until the recipient collects them. At the end of a turn, the hook hands a waiting message back to Claude as a reason to keep going. That happens at most once per turn, so two agents cannot keep each other running forever.
 - **New agents** start with `claude "<task>"` in a new terminal window. The task is passed as a single argument, never as shell text, and the new session does not inherit the per-session environment of whatever started it.
-- **Tasks** live in the same SQLite file. Claiming one is a single transaction, so two runners never take the same task. The queue settles itself: a task out of attempts fails, a task whose dependency did not finish is blocked, and a task whose runner went silent for five minutes goes back in the queue.
+- **Tasks** live in the same SQLite file. Claiming one is a single transaction, so two workers never take the same task, and never two tasks whose folders overlap. The queue settles itself: a task out of attempts fails, a task whose dependency did not finish is blocked, and a task whose runner went silent for five minutes goes back in the queue.
 - **The hook fails silent and fast.** If the server is not running, your sessions do not notice.
 
 ## What it costs, and what it cannot do
@@ -214,8 +231,9 @@ The parts worth knowing:
   | `--model sonnet`, no MCP servers, no user settings | $0.018 |
 
   So choose the model per role. In `config.json`, `agent_args` are added to every agent started from the board or with `agent.py new`, and `manager_args` to the manager, for example `"agent_args": ["--model", "sonnet"]`. The built-in task worker takes `OFFICE_WORKER_ARGS`.
-- **Two kinds of employee, on purpose.** A task-runner worker is headless: with a strict engine it may have no shell at all. Work that needs commands, a browser or back-and-forth goes to a live agent. The manager's rulebook makes that choice.
-- **Tasks run one after another.** The runner takes one task at a time. Live agents are what runs in parallel: each has its own terminal.
+- **Two kinds of employee, on purpose.** A task-runner worker is headless: with a strict engine it may have no shell at all. A check covers "prove it with a command". Work that needs a shell to be done at all (git, a deploy), a browser or back-and-forth goes to a live agent. The manager's rulebook makes that choice.
+- **Parallel means different folders.** Two tasks in the same folder take turns, by design. A task given to a live agent with `--to` is not counted as holding its folder, so do not hand the runner a task in a folder a live agent is editing.
+- **Parallel multiplies the spend.** Three workers at once use three times the tokens per minute, and reach a rate limit three times sooner. A worker that answers `pending` (not now) stops the run; the tasks stay queued.
 - **An idle agent is not woken by `tell`.** A session sitting at its prompt has no hook running, so the message waits for its next prompt and its desk shows an unread badge. `tell` says so when it happens, so the sender does not wait for nothing. Recent Claude Code builds have their own `SendMessage` tool between sessions, which does wake an idle one, and the rules point agents to it. Otherwise the agent starts a new one.
 - **Only hooked sessions are on the team.** A session started in a project without the hook is invisible to the others. Put the hook in `~/.claude/settings.json` to cover everything.
 - **Tested on Windows.** The macOS and Linux launchers for new agents are written but have not been run. Everything else is plain Python. Reports are welcome.
@@ -226,6 +244,8 @@ The parts worth knowing:
 - The hook sends the event, the working directory, the tool name and the transcript path. It sends no prompt text unless you set `OFFICE_SEND_PROMPT=1`.
 - Conversations and the "last asked" line in the roster are read from your transcript files by the local server. Your own sessions see each other's work. Any program on your machine that can reach localhost could ask the server the same thing, which is equally true of the transcript files themselves.
 - Starting new sessions is off unless you pass `--allow-spawn`.
+- The server answers the board and local programs only. A request that names another website as its origin, or reaches the server under another host name, is refused, so a page open in your browser cannot queue tasks or start agents behind your back.
+- The runner executes only the check commands written in your `config.json`. A task names a check; it never carries a command.
 
 ## Configuration
 
@@ -233,9 +253,10 @@ The parts worth knowing:
 |---|---|---|
 | `--port` / `OFFICE_PORT` | `8787` | Port for the server, the hook and `agent.py`. |
 | `--allow-spawn` / `OFFICE_ALLOW_SPAWN=1` | off | Let the board and agents start new sessions and run tasks. |
-| `config.json` / `OFFICE_CONFIG` | none | `worker_cmd`, `kinds`, `agent_args`, `manager_args`, `manager_dir` (the folder the manager starts in). A file that does not parse stops the runner rather than being ignored. |
+| `config.json` / `OFFICE_CONFIG` | none | `worker_cmd`, `kinds`, `parallel` (tasks at once, 1 to 8), `checks` (name to command), `agent_args`, `manager_args`, `manager_dir` (the folder the manager starts in). A file that does not parse stops the runner rather than being ignored. |
 | `OFFICE_WORKER_ARGS` | none | Extra arguments for the built-in `claude -p` worker. |
 | `OFFICE_WORKER_TIMEOUT` | `3600` | Seconds before a worker is stopped. |
+| `OFFICE_CHECK_TIMEOUT` | `900` | Seconds before a check command is stopped. |
 | `OFFICE_TEAM_FILE` | `team.md` next to `hook.py` | Your own team rules. |
 | `OFFICE_BRIEF=0` | on | Do not tell sessions about their teammates. |
 | `OFFICE_DB` | `./office.db` | Where the SQLite file lives. |
@@ -246,6 +267,8 @@ The parts worth knowing:
 ## Contributing
 
 Issues and pull requests are welcome. The most useful thing right now is a report from macOS or Linux on whether **+ New agent** opens a terminal correctly.
+
+The tests need nothing but Python and start no Claude session: `python -m unittest discover -s tests`.
 
 ## License
 

@@ -7,7 +7,8 @@
     python agent.py inbox [--wait SECONDS]    messages for you (optionally wait for one)
     python agent.py new <directory> <task>    start a new agent (its own terminal) on a task
     python agent.py task list                 the shared task list
-    python agent.py task add <directory> <title> [details] [--kind K] [--after T-1,T-2] [--to <agent>]
+    python agent.py task add <directory> <title> [details] [--kind K] [--after T-1,T-2]
+                             [--check NAME] [--to <agent>]
     python agent.py task run                  start the runner that works through the list
     python agent.py task done|blocked <id> <note>   close a task assigned to you
     python agent.py task retry <id> [better instruction] | task cancel <id>
@@ -151,14 +152,18 @@ def task(args):
         tasks = data["tasks"]
         if not tasks:
             print("The task list is empty.")
-            return 0
         for t in tasks:
             after = (" after %s" % ",".join("T-%d" % d for d in t["deps"])) if t["deps"] else ""
-            print("%s [%s] %s  (%s, attempt %d/%d%s)" % (
+            check = (", check %s" % t["check_name"]) if t.get("check_name") else ""
+            print("%s [%s] %s  (%s, attempt %d/%d%s%s)" % (
                 t["ref"], t["status"], t["title"], t.get("dir") or "no folder",
-                t["attempts"], t["max_attempts"], after))
+                t["attempts"], t["max_attempts"], after, check))
             if t.get("summary") and t["status"] != "pending":
                 print("     %s" % t["summary"][:300])
+        print("The runner works on %d task(s) at a time; tasks in the same folder take "
+              "turns.%s" % (data.get("parallel") or 1,
+                            (" Checks you can name with --check: %s."
+                             % ", ".join(data["checks"])) if data.get("checks") else ""))
         return 0
     if sub == "show" and len(args) >= 2:
         for t in _get("/api/tasks")["tasks"]:
@@ -172,13 +177,14 @@ def task(args):
         kind = _flag(rest, "--kind")
         after = _flag(rest, "--after")
         to = _flag(rest, "--to")
+        check = _flag(rest, "--check")
         if len(rest) < 2:
             print("usage: task add <directory> <title> [details] [--kind K] "
-                  "[--after T-1,T-2] [--to <agent>]")
+                  "[--after T-1,T-2] [--check NAME] [--to <agent>]")
             return 2
         r = _post("/api/tasks", {
             "dir": os.path.abspath(rest[0]), "title": rest[1],
-            "body": " ".join(rest[2:]), "kind": kind, "to": to,
+            "body": " ".join(rest[2:]), "kind": kind, "to": to, "check": check,
             "deps": [d for d in (after or "").split(",") if d.strip()],
             "created_by": ME or "an agent"})
         if not r.get("ok"):
@@ -224,7 +230,7 @@ def task(args):
               else "Runner started.")
         return 0
     print("usage: task list | task show <id> | task add <directory> <title> [details] "
-          "[--kind K] [--after T-1,T-2] [--to <agent>] | task run | "
+          "[--kind K] [--after T-1,T-2] [--check NAME] [--to <agent>] | task run | "
           "task done <id> <summary> | task blocked <id> <why> | "
           "task retry <id> [better instruction] | task cancel <id>")
     return 2

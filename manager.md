@@ -13,6 +13,8 @@ Your tool is the `agent.py` command from your session briefing. Every command be
 ## The two kinds of employee
 
 **The task runner.** `task add <directory> <title> <details> [--kind K] [--after T-1]`, then `task run`. A worker takes the task, and a reviewer checks the result before it counts as done. Use it for work that produces or edits files inside one folder: a page, a document, copy, a script. It is the cheap one. Its workers cannot run commands, open a browser, or ask questions, so the task text must be complete: what to produce, for whom, in which file, and how to tell it is right.
+- The runner works on several tasks at once (`task list` says how many), but never on two tasks in the same folder, or in a folder inside another task's folder. Give each task the narrowest folder its files live in: tasks in `site/pricing` and `site/blog` run together, two tasks in `site` take turns.
+- When a command can prove the result (tests, a build), add `--check <name>`. `task list` shows the names the operator defined. The runner runs that command after the worker, and a failure sends the task back to a worker with the output. You cannot invent a check: if none fits, verify the result yourself.
 
 **A live agent.** A Claude Code session in its own terminal, with a shell and tools. Use one when the work needs commands (tests, a build, git), a browser, or judgement with back-and-forth.
 - One is already on the subject: `task add <directory> <title> <details> --to <agent>`. It is told about the task and closes it itself.
@@ -25,7 +27,7 @@ Choose the task runner when you can, a live agent when you must. Never give a ta
 
 1. Hand out what is ready. Tasks that do not depend on each other go out together. Use `--after` for the ones that do.
 2. `wait`. It sleeps until something changes and tells you what: a task finished or got blocked, an agent finished its turn or is stuck on a permission, a message arrived. Call it again when it reports that nothing changed. Do not poll with `who` or `task list` in a loop.
-3. Check what came back before you count it. Read the file. Read the receipt (`task show <id>`) or the agent's conversation (`read <agent>`). If the work needed a test or a build and the worker could not run one, run it yourself. A worker saying "done" is not evidence.
+3. Check what came back before you count it. Read the file. Read the receipt (`task show <id>`) or the agent's conversation (`read <agent>`). If the work needed a test or a build and the task carried no check, run it yourself. A worker saying "done" is not evidence.
 4. Deal with what is stuck:
    - A blocked or failed task whose instruction was unclear: `task retry <id> <the missing instruction>`, once.
    - Blocked a second time, or blocked on something only the operator has: escalate.

@@ -7,8 +7,24 @@ board while it runs, records the outcome, and moves on. When nothing is ready it
     python runner.py              # drain the ready tasks (at most 10), then exit
     python runner.py --max 3
     python runner.py --once       # one task
+    python runner.py --parallel 3 # up to three tasks at the same time
 
 The board's "Run tasks" button starts it for you.
+
+SEVERAL AT ONCE. With --parallel N (or "parallel": N in config.json) the runner keeps
+up to N workers busy. The task list never hands out a task while another one is running
+in the same folder, or in a folder above or below it, so two workers do not write over
+each other: tasks in different folders overlap, tasks in one folder take turns.
+
+CHECKS. A worker may have no shell, so "the tests pass" is not something it can know.
+A task can name a check, a command you defined in config.json:
+
+    { "checks": { "tests": "python -m unittest discover -s tests" } }
+
+After the worker says done, the runner (not the model) runs that command in the task's
+folder. Exit code 0: the task is done. Anything else: the task goes back to a worker with
+the command's output, until it is out of attempts; then it is blocked for a person to see.
+A task can only pick a check by name. The commands themselves live in your config.
 
 THE WORKER. By default a task is given to a headless Claude Code session:
 `claude -p` in the task's folder, with the task as its prompt. Extra arguments come
@@ -21,6 +37,8 @@ put its command in config.json next to this file:
 
 The contract is small:
   - the task arrives as one JSON object on stdin: {id, ref, title, body, dir, kind, attempts}
+  - with --parallel, several copies of your worker run at the same time, each on a
+    task in a different folder; answer "pending" if yours cannot start right now
   - optional progress, one per line on stderr:   ##office activity: reviewing
   - the outcome, as the last such line on stdout:
         ##office result: {"status": "done", "summary": "...", ...}
@@ -45,6 +63,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 BASE = "http://127.0.0.1:%s" % (os.environ.get("OFFICE_PORT") or "8787")
 HEARTBEAT_SECS = 20
 WORKER_TIMEOUT = int(os.environ.get("OFFICE_WORKER_TIMEOUT") or 3600)
+CHECK_TIMEOUT = int(os.environ.get("OFFICE_CHECK_TIMEOUT") or 900)
+CHECK_OUTPUT_CHARS = 2500   # how much of a failed check's output goes back to the worker
+IDLE_POLL_SECS = 3          # a free worker looks again this often while others still run
+PARALLEL_MAX = 8
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 # Per-session variables of a Claude Code session that started us must not leak into a
@@ -223,53 +245,160 @@ def run_external(cmd, task, desk):
             "summary": text.strip()[-1500:] or "exit code %d" % proc.returncode}
 
 
-def run_one(owner):
-    """Claim and run one task. Returns False when nothing was ready."""
-    task = _post("/api/tasks/claim", {"owner": owner}).get("task")
-    if not task:
-        return False
-    worker_cmd = _config().get("worker_cmd")
+def run_check(task, cfg, desk):
+    """Run the check the task names (a command from config.json "checks") in the task's
+    folder. Returns {"name", "ok", "exit", "output"}; "exit" is None when the command
+    could not be run at all."""
+    name = task["check_name"]
+    checks = cfg.get("checks")
+    cmd = checks.get(name) if isinstance(checks, dict) else None
+    if not cmd:
+        return {"name": name, "ok": False, "exit": None,
+                "output": "config.json has no check named %r" % name}
+    cwd = task.get("dir") if task.get("dir") and os.path.isdir(task["dir"]) else None
+    desk.set("running the check: %s" % name)
+    try:
+        proc = subprocess.run(cmd, shell=isinstance(cmd, str), cwd=cwd,
+                              stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT, env=_clean_env(),
+                              timeout=CHECK_TIMEOUT, creationflags=NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        return {"name": name, "ok": False, "exit": None,
+                "output": "timed out after %ds" % CHECK_TIMEOUT}
+    except OSError as e:
+        return {"name": name, "ok": False, "exit": None,
+                "output": "could not start the command: %s" % e}
+    out = proc.stdout.decode("utf-8", "replace").strip()
+    return {"name": name, "ok": proc.returncode == 0, "exit": proc.returncode,
+            "output": out[-CHECK_OUTPUT_CHARS:]}
+
+
+def settle(task, result, cfg, desk):
+    """Turn a worker's answer into what gets recorded on the task. Returns the body for
+    /api/tasks/update, and whether the runner should go on to other tasks."""
+    status = result.get("status")
+    if status not in ("done", "blocked", "failed", "pending"):
+        status = "failed"
+    update = {"id": task["id"], "summary": result.get("summary") or "", "result": result}
+    # 'pending' from a worker means "not now" (a quota wait, an engine that is busy). It
+    # is not a failed attempt, and the run stops rather than claim the same task again.
+    go_on = status != "pending"
+    if status == "pending":
+        update["refund_attempt"] = True
+    if status == "done" and task.get("check_name"):
+        check = result["check"] = run_check(task, cfg, desk)
+        name = check["name"]
+        if check["ok"]:
+            update["summary"] = ("%s\nCheck %s passed." % (update["summary"], name)).strip()
+        elif check["exit"] is None:
+            status = "blocked"
+            update["summary"] = ("The work is finished but its check (%s) could not run: "
+                                 "%s" % (name, check["output"]))
+        elif task["attempts"] < task["max_attempts"]:
+            status = "pending"  # a real attempt was used: no refund
+            update["summary"] = ("Check %s failed (exit %d) on attempt %d of %d. Sent "
+                                 "back to a worker with the output."
+                                 % (name, check["exit"], task["attempts"],
+                                    task["max_attempts"]))
+            update["body_append"] = (
+                "The check `%s` was run after the previous attempt and FAILED (exit code "
+                "%d). Fix what it reports. The work only counts when this check passes. "
+                "Its output:\n%s" % (name, check["exit"], check["output"]))
+        else:
+            status = "blocked"
+            update["summary"] = ("Check %s still fails after %d attempts (exit %d). Last "
+                                 "output:\n%s" % (name, task["attempts"], check["exit"],
+                                                  check["output"][-600:]))
+    update["status"] = status
+    return update, go_on
+
+
+def run_task(task, cfg):
+    """Run one claimed task to its recorded outcome. Returns False when the whole run
+    should stop (the worker answered "not now")."""
     with Desk(task) as desk:
         try:
-            if worker_cmd:
-                result = run_external(worker_cmd, task, desk)
+            if cfg.get("worker_cmd"):
+                result = run_external(cfg["worker_cmd"], task, desk)
             else:
                 result = run_claude(task, desk)
         except Exception as e:  # noqa: BLE001  a broken worker must not strand the task
             result = {"status": "failed", "summary": "runner error: %s" % e}
-    status = result.get("status")
-    if status not in ("done", "blocked", "failed", "pending"):
-        status = "failed"
-    _post("/api/tasks/update", {"id": task["id"], "status": status,
-                                "summary": result.get("summary") or "", "result": result,
-                                "refund_attempt": status == "pending"})
-    print("%s %s: %s" % (task["ref"], status, (result.get("summary") or "")[:200]),
+        update, go_on = settle(task, result, cfg, desk)
+    _post("/api/tasks/update", update)
+    print("%s %s: %s" % (task["ref"], update["status"], update["summary"][:200]),
           flush=True)
-    # 'pending' means "not now" (a quota wait, an engine that is busy): stop this run
-    # rather than immediately claiming the same task again.
-    return status != "pending"
+    return go_on
+
+
+class Run:
+    """What the workers of one runner share."""
+
+    def __init__(self, limit):
+        self.lock = threading.Lock()
+        self.left = limit    # tasks this run may still start
+        self.done = 0
+        self.stop = False    # a worker said "not now": finish what runs, start nothing
+        self.error = None
+
+
+def work(owner, run, cfg):
+    """One worker: claim, run, repeat, until there is nothing left for it."""
+    try:
+        while True:
+            with run.lock:
+                if run.stop or run.left <= 0:
+                    return
+                run.left -= 1
+            answer = _post("/api/tasks/claim", {"owner": owner})
+            task = answer.get("task")
+            if not task:
+                with run.lock:
+                    run.left += 1
+                # Nothing for this worker right now. While other tasks are running, one
+                # of them may free a folder or finish a dependency: look again shortly.
+                if answer.get("running") and answer.get("pending"):
+                    time.sleep(IDLE_POLL_SECS)
+                    continue
+                return
+            go_on = run_task(task, cfg)
+            with run.lock:
+                run.done += 1
+                if not go_on:
+                    run.stop = True
+    except OSError as e:
+        with run.lock:
+            run.error = e
+            run.stop = True
 
 
 def main():
     ap = argparse.ArgumentParser(description="Run the tasks queued on The Office")
     ap.add_argument("--max", type=int, default=10, help="tasks to run before exiting")
     ap.add_argument("--once", action="store_true", help="run a single task")
+    ap.add_argument("--parallel", type=int, default=0,
+                    help='tasks to work on at the same time (default: "parallel" in '
+                         "config.json, else 1)")
     args = ap.parse_args()
     try:
-        _config()
-    except (OSError, ValueError) as e:
+        cfg = _config()
+        parallel = int(args.parallel or cfg.get("parallel") or 1)
+    except (OSError, ValueError, TypeError) as e:
         print("config.json is not valid (%s). Nothing was run." % e)
         return 1
-    owner = "runner-%d" % os.getpid()
-    done = 0
     limit = 1 if args.once else max(1, args.max)
-    try:
-        while done < limit and run_one(owner):
-            done += 1
-    except OSError as e:
-        print("The Office is not reachable at %s (%s)." % (BASE, e))
+    run = Run(limit)
+    workers = [threading.Thread(target=work, args=("runner-%d-%d" % (os.getpid(), n + 1),
+                                                   run, cfg))
+               for n in range(max(1, min(parallel, PARALLEL_MAX, limit)))]
+    for w in workers:
+        w.start()
+    for w in workers:
+        w.join()
+    if run.error:
+        print("The Office is not reachable at %s (%s)." % (BASE, run.error))
         return 1
-    print("ran %d task(s)" % done, flush=True)
+    print("ran %d task(s)" % run.done, flush=True)
     return 0
 
 

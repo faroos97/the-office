@@ -200,6 +200,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   body TEXT,                              -- the instruction handed to the worker
   dir TEXT,                               -- folder the work belongs to
   kind TEXT DEFAULT 'default',            -- free label the worker may use (e.g. a model class)
+  check_name TEXT,                        -- a check from config.json the runner runs afterwards
   deps TEXT DEFAULT '[]',                 -- JSON list of task ids that must be done first
   status TEXT NOT NULL DEFAULT 'pending', -- pending|running|done|blocked|failed|cancelled
   attempts INTEGER NOT NULL DEFAULT 0,
@@ -229,6 +230,8 @@ def _db():
         conn.execute("ALTER TABLE agents ADD COLUMN transcript_path TEXT")
     if "roster_sig" not in have:
         conn.execute("ALTER TABLE agents ADD COLUMN roster_sig TEXT")
+    if "check_name" not in {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}:
+        conn.execute("ALTER TABLE tasks ADD COLUMN check_name TEXT")
     return conn
 
 
@@ -765,6 +768,40 @@ def _config():
         return {"_error": "config.json is not valid (%s). Fix it or remove it." % e}
 
 
+PARALLEL_MAX = 8
+
+
+def _parallel(cfg):
+    """How many tasks the runner works on at once: config.json "parallel", default 1."""
+    try:
+        return max(1, min(int(cfg.get("parallel") or 1), PARALLEL_MAX))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _checks(cfg):
+    """The named checks of config.json: {"tests": "python -m unittest", ...}. A task may
+    name one; the runner executes it after the worker. Only the operator's config says
+    which commands exist, so a task (or the agent that queued it) can pick a check but
+    never supply a command."""
+    checks = cfg.get("checks")
+    return checks if isinstance(checks, dict) else {}
+
+
+def _norm_dir(path):
+    return os.path.normcase(os.path.abspath(path)).rstrip("\\/") if path else ""
+
+
+def _dirs_overlap(a, b):
+    """Two tasks may not run at the same time when one could write into the other's
+    folder: the same folder, or one inside the other. Tasks without a folder all run in
+    the runner's own folder, so they overlap each other."""
+    a, b = _norm_dir(a), _norm_dir(b)
+    if not a or not b:
+        return a == b
+    return a == b or a.startswith(b + os.sep) or b.startswith(a + os.sep)
+
+
 def _task_id(value):
     """Accept 12, "12" or "T-12"."""
     try:
@@ -800,11 +837,14 @@ def tasks_list(payload=None):
     for t in tasks:
         counts[t["status"]] = counts.get(t["status"], 0) + 1
     runner = _RUNNER.get("proc")
+    cfg = _config()
     return {"tasks": tasks, "counts": counts,
             "runner_active": bool(runner and runner.poll() is None),
             "can_run": os.environ.get("OFFICE_ALLOW_SPAWN") == "1",
-            "kinds": _config().get("kinds") or [],
-            "config_error": _config().get("_error")}
+            "kinds": cfg.get("kinds") or [],
+            "checks": sorted(_checks(cfg)),
+            "parallel": _parallel(cfg),
+            "config_error": cfg.get("_error")}
 
 
 def task_add(payload):
@@ -823,6 +863,14 @@ def task_add(payload):
         max_attempts = 2
     body = (payload.get("body") or "").strip()[:8000]
     creator = (payload.get("created_by") or "operator")[:80]
+    check = (payload.get("check") or "").strip() or None
+    if check and check not in _checks(_config()):
+        have = ", ".join(sorted(_checks(_config()))) or "none are defined"
+        return {"ok": False, "error": "no check named %r in config.json (%s)"
+                % (check, have)}
+    if check and payload.get("to"):
+        return {"ok": False, "error": "a check is run by the task runner; a task given "
+                "to a live agent is checked by that agent"}
     conn = _db()
     try:
         # `to` gives the task to a live agent instead of the runner: it is told about it
@@ -834,12 +882,12 @@ def task_add(payload):
                 return {"ok": False, "error": "no agent matches %r" % payload["to"]}
         with conn:
             cur = conn.execute(
-                "INSERT INTO tasks (title, body, dir, kind, deps, max_attempts,"
-                " created_by, status, owner) VALUES (?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO tasks (title, body, dir, kind, check_name, deps, max_attempts,"
+                " created_by, status, owner) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (title[:200], body,
                  (payload.get("dir") or "").strip() or (agent or {}).get("cwd"),
                  (payload.get("kind") or "default").strip()[:40] or "default",
-                 json.dumps(deps), max_attempts, creator,
+                 check, json.dumps(deps), max_attempts, creator,
                  "assigned" if agent else "pending",
                  agent["session_id"] if agent else None))
             tid = cur.lastrowid
@@ -871,7 +919,13 @@ def task_claim(payload):
     """Hand the next ready task to a runner, atomically: no two runners get the same
     one. Along the way the queue settles itself, so it cannot spin on work that can
     never run: a task out of attempts fails, a task whose dependency did not finish is
-    blocked, and a task left 'running' by a runner that went silent is put back."""
+    blocked, and a task left 'running' by a runner that went silent is put back.
+
+    Several runners (or one runner with several workers) may claim at once. A task is
+    held back while another task is running in a folder that overlaps its own, so two
+    workers never write into the same folder at the same time. With no task to give,
+    the answer says what is still going on ({running, pending}) so a worker can tell
+    "wait, something will free up" from "nothing left for me"."""
     owner = (payload.get("owner") or "runner")[:80]
     conn = _db()
     conn.isolation_level = None
@@ -884,6 +938,7 @@ def task_claim(payload):
             " AND (julianday('now')-julianday(updated_at))*86400 > ?",
             (TASK_STALE_SECS,))
         status = {r["id"]: r["status"] for r in conn.execute("SELECT id, status FROM tasks")}
+        busy = [r["dir"] for r in conn.execute("SELECT dir FROM tasks WHERE status='running'")]
         claimed = None
         for r in conn.execute("SELECT * FROM tasks WHERE status='pending' ORDER BY id").fetchall():
             t = _task_shape(r)
@@ -901,14 +956,19 @@ def task_claim(payload):
                 status[t["id"]] = "blocked"
                 continue
             if all(s == "done" for s in dep_states):
+                if any(_dirs_overlap(t["dir"], d) for d in busy):
+                    continue  # its folder is being worked on; it stays pending for now
                 conn.execute("UPDATE tasks SET status='running', owner=?, attempts=attempts+1,"
                              " started_at=datetime('now'), updated_at=datetime('now'),"
                              " finished_at=NULL WHERE id=?", (owner, t["id"]))
                 claimed = t["id"]
+                status[t["id"]] = "running"
                 break
         conn.execute("COMMIT")
         if claimed is None:
-            return {"ok": True, "task": None}
+            states = list(status.values())
+            return {"ok": True, "task": None, "running": states.count("running"),
+                    "pending": states.count("pending")}
         row = conn.execute("SELECT * FROM tasks WHERE id=?", (claimed,)).fetchone()
         return {"ok": True, "task": _task_shape(row)}
     except Exception:
@@ -980,8 +1040,9 @@ def tasks_run(payload):
     if os.environ.get("OFFICE_ALLOW_SPAWN") != "1":
         return {"ok": False, "error": "running tasks is off. Start office.py with "
                 "--allow-spawn to turn it on."}
-    if _config().get("_error"):
-        return {"ok": False, "error": _config()["_error"]}
+    cfg = _config()
+    if cfg.get("_error"):
+        return {"ok": False, "error": cfg["_error"]}
     proc = _RUNNER.get("proc")
     if proc and proc.poll() is None:
         return {"ok": True, "already_running": True}
@@ -990,7 +1051,8 @@ def tasks_run(payload):
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
     try:
         _RUNNER["proc"] = subprocess.Popen(
-            [sys.executable, os.path.join(here, "runner.py")], cwd=here, env=env,
+            [sys.executable, os.path.join(here, "runner.py"),
+             "--parallel", str(_parallel(cfg))], cwd=here, env=env,
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, creationflags=flags)
     except OSError as e:
@@ -1107,7 +1169,22 @@ class Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def _local(self):
+        """True when the request comes from the board itself or from a local program.
+        The server starts sessions and queues work, so a page on some other site that
+        happens to be open in the operator's browser must not be able to call it, and
+        neither may a DNS name that someone pointed at 127.0.0.1. A browser names the
+        calling page in Origin; local programs (hook.py, agent.py, runner.py) send none."""
+        port = self.server.server_address[1]
+        names = {"%s:%d" % (h, port) for h in ("127.0.0.1", "localhost")}
+        if (self.headers.get("Host") or "").strip().lower() not in names:
+            return False
+        origin = self.headers.get("Origin")
+        return origin is None or origin.strip().lower() in {"http://" + n for n in names}
+
     def do_GET(self):
+        if not self._local():
+            return self._send(403, {"error": "local requests only"}, "application/json")
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
             return self._send(200, _read_page(), "text/html; charset=utf-8")
@@ -1127,6 +1204,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "not found"}, "application/json")
 
     def do_POST(self):
+        if not self._local():
+            return self._send(403, {"error": "local requests only"}, "application/json")
         path = self.path.split("?", 1)[0]
         routes = {
             "/api/agents/report": report,
