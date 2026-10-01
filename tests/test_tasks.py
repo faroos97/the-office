@@ -14,6 +14,7 @@ import threading
 import time
 import unittest
 import urllib.error
+from unittest import mock
 import urllib.request
 from http.server import ThreadingHTTPServer
 
@@ -104,6 +105,59 @@ class Claim(unittest.TestCase):
         self.assertEqual(office._parallel({"parallel": 3}), 3)
         self.assertEqual(office._parallel({"parallel": 99}), office.PARALLEL_MAX)
         self.assertEqual(office._parallel({"parallel": "many"}), 1)
+
+
+class WhereAgentsStart(unittest.TestCase):
+    """A new agent starts in the folder whose Claude Code settings run the hook."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="proj-", dir=_TMP)
+        self.sub = os.path.join(self.root, "site", "blog")
+        os.makedirs(self.sub)
+        os.makedirs(os.path.join(self.root, ".claude"))
+        hook = os.path.join(ROOT, "hook.py")
+        with open(os.path.join(self.root, ".claude", "settings.local.json"), "w") as f:
+            json.dump({"hooks": {"SessionStart": [{"hooks": [
+                {"type": "command", "command": 'python "%s"' % hook}]}]}}, f)
+        # a home folder without the hook, whatever the machine running the tests has
+        home = tempfile.mkdtemp(prefix="home-", dir=_TMP)
+        patcher = mock.patch.object(office.os.path, "expanduser",
+                                    lambda p: p.replace("~", home, 1))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def spawn(self, cwd, **extra):
+        with mock.patch.object(office.subprocess, "Popen") as popen, \
+                mock.patch.dict(os.environ, {"OFFICE_ALLOW_SPAWN": "1"}):
+            result = office.spawn_agent(dict({"cwd": cwd, "task": "Write the post"}, **extra))
+        return result, popen
+
+    def test_folder_with_the_hook_is_used_as_is(self):
+        self.assertTrue(office._runs_hook(self.root))
+        self.assertFalse(office._runs_hook(self.sub))
+        result, popen = self.spawn(self.root)
+        self.assertEqual((result["ok"], result["area"], result["warning"]), (True, None, None))
+        self.assertEqual(popen.call_args.kwargs["cwd"], self.root)
+        self.assertEqual(result["task"], "Write the post")
+
+    def test_sub_folder_starts_where_the_hook_is_and_names_its_area(self):
+        self.assertEqual(office._team_folder(self.sub), self.root)
+        result, popen = self.spawn(self.sub)
+        self.assertEqual(popen.call_args.kwargs["cwd"], self.root)
+        self.assertEqual(result["area"], self.sub)
+        self.assertTrue(result["task"].startswith("Your area is the folder"))
+        self.assertIn("site/blog", result["task"])
+        self.assertTrue(result["task"].endswith("Write the post"))
+
+    def test_hook_in_the_users_own_settings_covers_every_folder(self):
+        with mock.patch.object(office, "_runs_hook", lambda folder: "home-" in folder):
+            self.assertEqual(office._team_folder(self.sub), self.sub)
+
+    def test_no_hook_anywhere_warns_instead_of_pretending(self):
+        with mock.patch.object(office, "_team_folder", lambda cwd: None):
+            result, popen = self.spawn(self.sub)
+        self.assertTrue(popen.called)
+        self.assertIn("do not report to The Office", result["warning"])
 
 
 class LiveServer(unittest.TestCase):

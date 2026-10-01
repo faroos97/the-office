@@ -111,7 +111,7 @@ By default the worker is a headless Claude Code session (`claude -p`) in the tas
 
 **Start manager** on the board opens a Claude Code session with one job: run the team. You give it a goal. It keeps the task list, hands file work to the runner and anything that needs a shell or a browser to a live agent, sleeps until something changes (`agent.py wait`), checks what comes back, retries what was unclear, and comes to you only for what is yours to decide: money, anything sent to a client or published, anything that cannot be undone, and whatever is blocked twice.
 
-Its rulebook is [`manager.md`](manager.md), a plain file you can edit. The other agents are told who the manager is, and close the tasks it assigns them with `task done` or `task blocked`.
+Its rulebook is [`manager.md`](manager.md), a plain file you can edit. The manager receives it as the output of its first command, `agent.py manager start`, not by opening the file: a session has to ask you before it reads outside its own project. The other agents are told who the manager is, and close the tasks it assigns them with `task done` or `task blocked`.
 
 From a test run, the manager's own report after a small goal:
 
@@ -120,6 +120,15 @@ The test run worked. One cheap task went through the task runner, passed review,
 - Result: task T-2 is done. hello.md holds exactly one line. I checked the bytes myself: 27 bytes, no extra lines.
 - Nothing else touched: the only other file in that folder is dated this morning, so the earlier test left it, not this one.
 - Still running / needs you: nothing.
+```
+
+And when the goal needs a shell, it hires. Asked how many tests a folder had and whether they passed, the manager started a live agent, slept, was woken by that agent's message 20 seconds later, and reported, 57 seconds after it was started:
+
+```text
+system/orchestration has 79 unit tests, and all of them pass.
+- Who ran it: a new live agent, "System orchestration unit tests". The tests took 1.05 seconds and the result was OK.
+- How I checked: I read its conversation as well as the message it sent me. I didn't run the tests myself.
+- Still open: nothing. That agent is idle at its prompt, so you can close its window.
 ```
 
 The task list is the memory, not the manager. When its session gets long it writes the state into the list and steps down, and a fresh manager carries on from there.
@@ -236,6 +245,7 @@ The parts worth knowing:
 - **Parallel multiplies the spend.** Three workers at once use three times the tokens per minute, and reach a rate limit three times sooner. A worker that answers `pending` (not now) stops the run; the tasks stay queued.
 - **An idle agent is not woken by `tell`.** A session sitting at its prompt has no hook running, so the message waits for its next prompt and its desk shows an unread badge. `tell` says so when it happens, so the sender does not wait for nothing. Recent Claude Code builds have their own `SendMessage` tool between sessions, which does wake an idle one, and the rules point agents to it. Otherwise the agent starts a new one.
 - **Only hooked sessions are on the team.** A session started in a project without the hook is invisible to the others. Put the hook in `~/.claude/settings.json` to cover everything.
+- **Claude Code counts the folder a session starts in as its project.** Approvals are kept per folder, so a session started in a sub-folder that was never used can sit at a first-run question (a new MCP server, folder trust) on your screen. New agents are therefore started in the folder whose settings hold the hook, or the nearest one above the folder you asked for, with that folder named in their task as the area to work in. Found the hard way: a manager started an agent in a sub-folder and waited for a session that was itself waiting for a keypress.
 - **Tested on Windows.** The macOS and Linux launchers for new agents are written but have not been run. Everything else is plain Python. Reports are welcome.
 
 ## Privacy and safety

@@ -1086,10 +1086,62 @@ def _claude_bin():
     return "claude"
 
 
+def _strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from _strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from _strings(v)
+
+
+def _runs_hook(folder):
+    """True when the Claude Code settings in `folder`/.claude run this office's hook.py,
+    so a session started in that folder reports here and is briefed about its team."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    mark = (os.path.basename(here) + "/hook.py").lower()
+    for name in ("settings.json", "settings.local.json"):
+        try:
+            with open(os.path.join(folder, ".claude", name), encoding="utf-8-sig") as f:
+                hooks = json.load(f).get("hooks")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if any(mark in s.replace("\\", "/").lower() for s in _strings(hooks)):
+            return True
+    return False
+
+
+def _team_folder(cwd):
+    """The folder to start a session in so that it is on the team: `cwd` itself when
+    sessions started there run the hook (or when the hook is in the user's own settings,
+    which cover every folder), else the nearest folder above it that does. None when no
+    folder on the way up does.
+
+    Claude Code treats the folder a session starts in as its project: approvals and
+    project settings are kept per folder. A session started in a sub-folder that has
+    never been used can sit at a first-run question (trust, a new MCP server) on the
+    operator's screen, and if that folder's settings do not name the hook it never
+    shows up here. Starting where the hook already is avoids both."""
+    if _runs_hook(os.path.expanduser("~")):
+        return cwd
+    folder = os.path.abspath(cwd)
+    while True:
+        if _runs_hook(folder):
+            return folder
+        parent = os.path.dirname(folder)
+        if parent == folder:
+            return None
+        folder = parent
+
+
 def spawn_agent(payload):
-    """Open a new terminal window running an interactive `claude` session in `cwd`,
-    started on `task`. This is how you (from the board) or an agent (from agent.py)
-    creates another agent.
+    """Open a new terminal window running an interactive `claude` session for the folder
+    `cwd`, started on `task`. This is how you (from the board) or an agent (from
+    agent.py) creates another agent. The session starts in `cwd` when sessions there
+    report to this office, else in the nearest folder above it that does, with `cwd`
+    named in its task as the area to work in (see _team_folder).
 
     Off unless the server was started with OFFICE_ALLOW_SPAWN=1: it starts a local
     program, so it is opt-in, and the server only ever listens on 127.0.0.1."""
@@ -1111,15 +1163,30 @@ def spawn_agent(payload):
                 return {"ok": False, "error": "a floor manager is already running"}
         finally:
             conn.close()
-        here = os.path.dirname(os.path.abspath(__file__)).replace("\\", "/")
+        # The rulebook reaches the manager through `manager start`, which prints it. It
+        # is not told to open manager.md itself: that file is outside its project, and
+        # Claude Code would stop to ask the operator before reading it.
         goal = " ".join((payload.get("task") or "").split())
         payload = dict(payload, task=(
-            "You are the floor manager for this team of agents. Read the file "
-            "%s/manager.md now and follow it exactly. %s"
-            % (here, ("The operator's goal for this session: " + goal) if goal else
+            "You are the floor manager for this team of agents. Your first action: run "
+            "`manager start` with the agent.py tool from your session briefing. It "
+            "registers you and prints your rulebook. Follow that rulebook exactly. %s"
+            % (("The operator's goal for this session: " + goal) if goal else
                "The operator gave no specific goal: work from the task list and the "
                "team's priorities, and ask if the next step is not clear.")))
         extra = cfg.get("manager_args") or extra
+    area, warning = None, None
+    start = _team_folder(cwd)
+    if start is None:
+        warning = ("Sessions started in %s do not report to The Office (no hook in its "
+                   "Claude Code settings, nor in a folder above it): this agent will "
+                   "work, but the team will not see it and it will not know the team."
+                   % cwd)
+    elif _norm_dir(start) != _norm_dir(cwd):
+        area, cwd = cwd, start
+        payload = dict(payload, task="Your area is the folder %s: work in that folder, "
+                       "not in the one this session starts in. %s"
+                       % (area.replace("\\", "/"), payload.get("task") or ""))
     # one line, no quotes: the task is passed as a single argument, never as shell text
     task = " ".join((payload.get("task") or "").split()).replace('"', "'")[:2000]
     args = [_claude_bin()] + [str(a) for a in extra] + ([task] if task else [])
@@ -1141,7 +1208,7 @@ def spawn_agent(payload):
             subprocess.Popen([term, "-e"] + args, cwd=cwd, env=env)
     except OSError as e:
         return {"ok": False, "error": "could not open a terminal: %s" % e}
-    return {"ok": True, "cwd": cwd, "task": task}
+    return {"ok": True, "cwd": cwd, "area": area, "task": task, "warning": warning}
 
 
 # ---------------------------------------------------------------- http server

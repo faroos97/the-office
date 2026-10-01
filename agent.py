@@ -13,6 +13,7 @@
     python agent.py task done|blocked <id> <note>   close a task assigned to you
     python agent.py task retry <id> [better instruction] | task cancel <id>
     python agent.py manager start|stop|status the floor manager registers itself
+                                              (start prints its rulebook, manager.md)
     python agent.py wait [--timeout 100]      sleep until something changes, then say what
 
 <agent> is loose: its folder name, a few words of its title, or the start of its session
@@ -236,11 +237,27 @@ def task(args):
     return 2
 
 
+def _rulebook():
+    """manager.md, next to this file. It is printed rather than left for the manager to
+    open: a session may not read a file outside its own project without asking its
+    operator, and a manager that starts by waiting for a click is not managing."""
+    path = os.environ.get("OFFICE_MANAGER_FILE") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "manager.md")
+    try:
+        with open(path, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError as e:
+        return "(the rulebook %s could not be read: %s)" % (path, e)
+
+
 def manager(args):
     """Register (or step down as) the floor manager."""
     action = args[0] if args else "status"
+    if action == "rules":
+        print(_rulebook())
+        return 0
     if action not in ("start", "stop", "status"):
-        print("usage: manager start | manager stop | manager status")
+        print("usage: manager start | manager stop | manager status | manager rules")
         return 2
     r = _post("/api/manager", {"action": action, "session_id": ME})
     if not r.get("ok"):
@@ -248,6 +265,8 @@ def manager(args):
         return 1
     if action == "start":
         print("You are registered as the floor manager. The other agents are told.")
+        print("Your rulebook follows. Follow it exactly.\n")
+        print(_rulebook())
     elif action == "stop":
         print("No floor manager is registered now.")
     else:
@@ -342,8 +361,18 @@ def new(directory, task):
     if not r.get("ok"):
         print("error: %s" % r.get("error"))
         return 1
-    print("New agent started in %s. It will appear in `agent.py who` within a few "
-          "seconds." % r.get("cwd"))
+    if r.get("area"):
+        print("New agent started in %s (the folder whose sessions report to The Office), "
+              "with %s as its area." % (r.get("cwd"), r["area"]))
+    else:
+        print("New agent started in %s." % r.get("cwd"))
+    if r.get("warning"):
+        print("WARNING: %s" % r["warning"])
+    else:
+        print("It appears in `who` within about twenty seconds. If it does not, its "
+              "terminal is waiting on the operator (Claude Code asks once before it "
+              "works in a folder it has never been started in): tell the operator "
+              "which window, and do not start a second one.")
     return 0
 
 

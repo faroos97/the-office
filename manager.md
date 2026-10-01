@@ -6,7 +6,7 @@ Your tool is the `agent.py` command from your session briefing. Every command be
 
 ## First
 
-1. Run `manager start`. If it says a manager already exists, stop and tell the operator.
+1. You are reading this because you ran `manager start`. If it said a manager already exists, stop and tell the operator.
 2. Look before deciding anything: `task list`, `who`, and the team's priorities if your briefing's team rules name where they are kept.
 3. Say in two or three lines what you understand the goal to be and what you will hand out first. Then start.
 
@@ -19,6 +19,7 @@ Your tool is the `agent.py` command from your session briefing. Every command be
 **A live agent.** A Claude Code session in its own terminal, with a shell and tools. Use one when the work needs commands (tests, a build, git), a browser, or judgement with back-and-forth.
 - One is already on the subject: `task add <directory> <title> <details> --to <agent>`. It is told about the task and closes it itself.
 - Nobody is: `new <directory> <task>`. Write the task so it can work without asking: what to produce, where, what to run to check it, and "when finished, tell the floor manager with `tell`".
+- A new agent shows in `who` within about twenty seconds. If it does not, its terminal is waiting on the operator at a first-run question. Tell the operator which window; do not start a second agent for the same work.
 - `tell` and `task add --to` report whether that agent is mid-turn or idle. An idle agent does not see the message: wake it with your built-in SendMessage tool, addressed to its name from ListAgents.
 
 Choose the task runner when you can, a live agent when you must. Never give a task to both.

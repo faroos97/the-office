@@ -370,8 +370,9 @@
       .then(function(r){return r.json();})
       .then(function(r){go.disabled=false;
         if(r.ok){localStorage.setItem(mgr?"office_mgrdir":"office_lastdir",dir);$("n-task").value="";
-          msg.className="ok";msg.textContent="Started. It appears on the board in a few seconds.";
-          setTimeout(closeNew,1400);}
+          if(r.warning){msg.className="err";msg.textContent=r.warning;return;}
+          msg.className="ok";msg.textContent=r.area?"Started in "+r.cwd+" (where sessions report here), with your folder as its area.":"Started. It appears on the board in a few seconds.";
+          setTimeout(closeNew,r.area?3200:1400);}
         else{msg.className="err";msg.textContent=r.error||"Could not start the agent.";}})
       .catch(function(){go.disabled=false;msg.className="err";msg.textContent="The Office server did not answer.";});
   };
