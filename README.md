@@ -50,6 +50,8 @@ It hears about the team again only when the team changes: someone arrives, leave
 
 It also receives a short set of rules. Before researching or building something, check whether a teammate already did it, and read that conversation instead of redoing the work. If a job belongs to another area, ask the agent there. If nobody covers that area, start an agent there. When you finish something a teammate is waiting for, tell it.
 
+Your own rules (`team.md`, see [Teach it your team](#teach-it-your-team)) arrive the same way, and they stay live: edit the file and every running session receives the new version with its next prompt, once. No restart, no telling each agent.
+
 ### 4. Agents that talk to each other, and hire
 
 Each agent gets one small command-line tool:
@@ -58,6 +60,7 @@ Each agent gets one small command-line tool:
 agent.py who                      who is working on what
 agent.py read <agent>             read another agent's conversation
 agent.py tell <agent> <message>   leave it a message
+agent.py tell all <message>       leave the same message for every agent on the board
 agent.py inbox --wait 300         wait for the answer
 agent.py new <directory> <task>   start a new agent, in its own terminal
 ```
@@ -183,7 +186,18 @@ Shared ground:
 - All agents share one git checkout. Do not switch branches while others are working.
 ```
 
-Every session receives it at start. That last rule matters more than it looks: several agents in one checkout will switch branches under each other unless told not to.
+Every session receives it at start, and again whenever the file changes, with its next prompt. That last rule matters more than it looks: several agents in one checkout will switch branches under each other unless told not to.
+
+**Standing orders the harness enforces.** A rule an agent has to remember is a rule it will sometimes forget. For "when I say X, do Y", add a prompt trigger to `config.json`: when a prompt matches, the hook adds the line to that session's context right then, in every session, with no agent having to remember anything.
+
+```json
+"prompt_triggers": [
+  {"match": "\\bgood job\\b",
+   "say": "The operator said good job: commit your finished work now, your own files only, never git add -A."}
+]
+```
+
+`match` is a case-insensitive regular expression. The prompt is matched inside the hook process and is not sent anywhere.
 
 ## Your own worker
 
@@ -229,7 +243,7 @@ The parts worth knowing:
 
 ## What it costs, and what it cannot do
 
-- **Tokens.** The briefing a session receives at start is about 400 tokens, plus about 40 per teammate, plus your `team.md`. After that it only receives the roster again when the team changes. Agents that talk to each other spend what any Claude turn spends, on both sides.
+- **Tokens.** The briefing a session receives at start is about 400 tokens, plus about 40 per teammate, plus your `team.md`. After that it only receives the roster again when the team changes, and your `team.md` again only when you edit it. Agents that talk to each other spend what any Claude turn spends, on both sides.
 - **A session costs what its startup loads.** Every worker, agent and manager is a Claude Code session, and a session begins by loading your model, plugins, MCP servers and settings. Measured on the author's machine, which has a lot of them, for the same one-word task:
 
   | Started with | Cost |
@@ -263,11 +277,11 @@ The parts worth knowing:
 |---|---|---|
 | `--port` / `OFFICE_PORT` | `8787` | Port for the server, the hook and `agent.py`. |
 | `--allow-spawn` / `OFFICE_ALLOW_SPAWN=1` | off | Let the board and agents start new sessions and run tasks. |
-| `config.json` / `OFFICE_CONFIG` | none | `worker_cmd`, `kinds`, `parallel` (tasks at once, 1 to 8), `checks` (name to command), `agent_args`, `manager_args`, `manager_dir` (the folder the manager starts in). A file that does not parse stops the runner rather than being ignored. |
+| `config.json` / `OFFICE_CONFIG` | none | `worker_cmd`, `kinds`, `parallel` (tasks at once, 1 to 8), `checks` (name to command), `agent_args`, `manager_args`, `manager_dir` (the folder the manager starts in), `prompt_triggers` (standing orders, see [Teach it your team](#teach-it-your-team)). A file that does not parse stops the runner rather than being ignored. |
 | `OFFICE_WORKER_ARGS` | none | Extra arguments for the built-in `claude -p` worker. |
 | `OFFICE_WORKER_TIMEOUT` | `3600` | Seconds before a worker is stopped. |
 | `OFFICE_CHECK_TIMEOUT` | `900` | Seconds before a check command is stopped. |
-| `OFFICE_TEAM_FILE` | `team.md` next to `hook.py` | Your own team rules. |
+| `OFFICE_TEAM_FILE` | `team.md` next to `hook.py` | Your own team rules. Re-sent to running sessions when it changes. |
 | `OFFICE_BRIEF=0` | on | Do not tell sessions about their teammates. |
 | `OFFICE_DB` | `./office.db` | Where the SQLite file lives. |
 | `OFFICE_CLAUDE_BIN` | found on `PATH` | The `claude` executable used for new agents. |

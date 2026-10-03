@@ -230,6 +230,8 @@ def _db():
         conn.execute("ALTER TABLE agents ADD COLUMN transcript_path TEXT")
     if "roster_sig" not in have:
         conn.execute("ALTER TABLE agents ADD COLUMN roster_sig TEXT")
+    if "rules_sig" not in have:
+        conn.execute("ALTER TABLE agents ADD COLUMN rules_sig TEXT")
     if "check_name" not in {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}:
         conn.execute("ALTER TABLE tasks ADD COLUMN check_name TEXT")
     return conn
@@ -626,18 +628,30 @@ def team(payload):
 
     Sent in full when `force` is set (session start). Otherwise only when the team
     changed since this agent last saw it (someone arrived, left, or moved to a new
-    subject), so a session is not re-told the same roster on every prompt."""
+    subject), so a session is not re-told the same roster on every prompt.
+
+    `rules_sig` is the hook's fingerprint of the team rules file (team.md). The reply
+    says `rules_changed` when it differs from the one this session last read, so the
+    hook can hand a running session the new rules instead of waiting for a restart."""
     me = (payload.get("session_id") or "").strip()
+    rules_sig = payload.get("rules_sig")
     conn = _db()
     try:
         others = _others(conn, me)
         boss = _manager_sid(conn)
         sig = "|".join(sorted("%s:%s" % (r["session_id"][:8], r.get("task") or "")
                               for r in others)) + "|mgr:" + (boss or "")[:8]
-        mine = conn.execute("SELECT roster_sig FROM agents WHERE session_id=?",
+        mine = conn.execute("SELECT roster_sig, rules_sig FROM agents WHERE session_id=?",
                             (me,)).fetchone()
+        rules_changed = False
+        if rules_sig is not None and mine is not None and mine["rules_sig"] != rules_sig:
+            rules_changed = True
+            with conn:
+                conn.execute("UPDATE agents SET rules_sig=? WHERE session_id=?",
+                             (rules_sig, me))
         if not payload.get("force") and mine is not None and mine["roster_sig"] == sig:
-            return {"text": "", "changed": False, "count": len(others)}
+            return {"text": "", "changed": False, "count": len(others),
+                    "rules_changed": rules_changed}
         if mine is not None:
             with conn:
                 conn.execute("UPDATE agents SET roster_sig=? WHERE session_id=?",
@@ -646,7 +660,7 @@ def team(payload):
         conn.close()
     if not others:
         return {"text": "[The Office] No other agents are running right now.",
-                "changed": True, "count": 0}
+                "changed": True, "count": 0, "rules_changed": rules_changed}
     lines = ["[The Office] Your teammates right now (other Claude Code agents working "
              "for the same person):"]
     for r in others:
@@ -664,13 +678,15 @@ def team(payload):
             "the task list. Tell it when you finish something it gave you or when you "
             "are blocked on something outside your area; if it assigned you a task, "
             "close it with `task done` or `task blocked`.")
-    return {"text": "\n".join(lines), "changed": True, "count": len(others)}
+    return {"text": "\n".join(lines), "changed": True, "count": len(others),
+            "rules_changed": rules_changed}
 
 
 # ---------------------------------------------------------------- messaging
 def send_message(payload):
     """One agent leaves a message for another. `to` is a loose reference (folder name,
-    title fragment, session id); `to_session` / `to_name` also work. The sender is
+    title fragment, session id); `to_session` / `to_name` also work. `to` = "all"
+    leaves the same message for every other agent on the board. The sender is
     identified by `from_session`, or by `from_cwd` (the directory it runs in)."""
     text = (payload.get("text") or "").strip()
     if not text:
@@ -689,6 +705,23 @@ def send_message(payload):
         from_name = _label(sender) or payload.get("from_name") or "another agent"
 
         to_session, to_name = payload.get("to_session"), payload.get("to_name")
+        if (payload.get("to") or "").strip().lower() == "all" and not to_session:
+            targets = _others(conn, sender["session_id"] if sender else None)
+            if not targets:
+                return {"ok": False, "error": "no other agent is on the board right now"}
+            # addressed by session only: a to_name would also match every other desk in
+            # the same folder and deliver the message several times over
+            with conn:
+                for r in targets:
+                    conn.execute(
+                        "INSERT INTO messages (from_session, from_name, to_session,"
+                        " to_name, text) VALUES (?,?,?,NULL,?)",
+                        (sender["session_id"] if sender else None, from_name,
+                         r["session_id"], text[:4000]))
+            return {"ok": True, "broadcast": True, "count": len(targets),
+                    "recipients": [{"label": _label(r), "state": r["state"],
+                                    "mid_turn": r["state"] in ("working", "blocked")}
+                                   for r in targets]}
         if payload.get("to") and not to_session:
             target = _resolve(conn, payload["to"])
             if not target:

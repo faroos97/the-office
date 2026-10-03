@@ -9,12 +9,19 @@ three things:
        - SessionStart: who the other agents are, what each is on, the agent.py tool,
          and the team rules (plus your own, from team.md next to this file or the file
          named by OFFICE_TEAM_FILE). Claude Code adds this hook's stdout to the context.
-       - UserPromptSubmit: the roster again, only when it changed.
+       - UserPromptSubmit: the roster again, only when it changed; and your team.md
+         again, only when it changed since this session last read it. Edit the file
+         and every running session has the new rules with its next prompt.
   3. Delivers messages other agents left for this session:
        - UserPromptSubmit: printed, so they land in context with the new prompt;
        - Stop: returned as a "block" decision, so the agent reads the message and keeps
          going instead of going idle. Only once per turn (never when Claude is already
          continuing because of a stop hook), so two agents cannot ping-pong forever.
+  4. Prompt triggers (optional, "prompt_triggers" in config.json): when the user's
+     prompt matches a pattern, the matching line is added to the context. This is how
+     a standing order ("when I say X, do Y") is enforced by the harness in every
+     session instead of being remembered by each agent. The prompt is matched here,
+     in this process; it is not sent anywhere.
 
 Wire it for: SessionStart, UserPromptSubmit, PostToolUse, Notification, Stop, SessionEnd
 (see README.md). Standard library only. Fails silent and fast: a hook must never slow
@@ -24,14 +31,58 @@ Privacy: forwards the event, cwd, tool name, transcript path, and a Notification
 message. Prompts are forwarded only with OFFICE_SEND_PROMPT=1 (first 400 chars, to
 localhost, as a fallback title).
 
-Env: OFFICE_PORT (8787) · OFFICE_SEND_PROMPT (off) · OFFICE_BRIEF=0 to skip step 2.
+Env: OFFICE_PORT (8787) · OFFICE_SEND_PROMPT (off) · OFFICE_BRIEF=0 to skip step 2
+· OFFICE_TEAM_FILE · OFFICE_CONFIG (config.json next to this file).
 """
+import hashlib
 import json
 import os
+import re
 import sys
 import urllib.request
 
 TIMEOUT = 0.6
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def team_rules():
+    """(text, fingerprint) of the team's own rules file. ('', '') when there is none."""
+    path = os.environ.get("OFFICE_TEAM_FILE") or os.path.join(HERE, "team.md")
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read().strip()
+    except OSError:
+        return "", ""
+    if not text:
+        return "", ""
+    return text, hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def prompt_triggers(prompt, config_path=None):
+    """Lines to add to the context for this prompt, from "prompt_triggers" in
+    config.json: a list of {"match": <regex, case-insensitive>, "say": <text>}.
+    A bad entry is skipped; a missing or unreadable file means no triggers."""
+    if not prompt:
+        return []
+    path = config_path or os.environ.get("OFFICE_CONFIG") or os.path.join(HERE, "config.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            triggers = (json.load(f) or {}).get("prompt_triggers") or []
+    except (OSError, ValueError, AttributeError):
+        return []
+    out = []
+    for t in triggers:
+        if not isinstance(t, dict):
+            continue
+        pattern, say = t.get("match"), (t.get("say") or "").strip()
+        if not pattern or not say:
+            continue
+        try:
+            if re.search(pattern, str(prompt), re.IGNORECASE | re.DOTALL):
+                out.append("[The Office] " + say[:2000])
+        except re.error:
+            continue
+    return out
 
 
 def main():
@@ -85,34 +136,36 @@ def main():
 
     out = sys.stdout.buffer
     briefing = os.environ.get("OFFICE_BRIEF") != "0"
+    rules_text, rules_sig = team_rules()
 
     def _team(force):
-        """The roster of the other agents, as text ('' when nothing new to say)."""
+        """The roster of the other agents: {"text": '' when nothing new to say,
+        "rules_changed": True when team.md differs from what this session last read}."""
         try:
-            raw_ = _post("/api/team", {"session_id": session_id, "force": force},
-                         wait=2.0)
-            return (json.loads(raw_.decode("utf-8")) or {}).get("text") or ""
+            raw_ = _post("/api/team", {"session_id": session_id, "force": force,
+                                       "rules_sig": rules_sig}, wait=2.0)
+            return json.loads(raw_.decode("utf-8")) or {}
         except Exception:
-            return ""
+            return {}
 
     if event == "SessionStart":
         if not briefing:
             return
-        here = os.path.dirname(os.path.abspath(__file__))
         tool = '"%s" "%s"' % (sys.executable.replace("\\", "/"),
-                              os.path.join(here, "agent.py").replace("\\", "/"))
+                              os.path.join(HERE, "agent.py").replace("\\", "/"))
         parts = [
             "[The Office] You are one of several Claude Code agents working for the "
             "same person, each in its own terminal. You work as a team, without being "
             "asked to.",
-            _team(True),
+            _team(True).get("text") or "",
             "Your tool for that (in PowerShell, prefix the line with &):\n"
             "  %s <command>\n"
             "Commands: who | read <agent> (its conversation) | tell <agent> <message> "
-            "| inbox --wait 300 (wait for a reply) | new <directory> <task> (start a "
-            "new agent in its own terminal) | task list | task add <directory> <title> "
-            "<details> (queue work on the shared task list for the task runner). "
-            "<agent> = its folder name or a few words of its title." % tool,
+            "| tell all <message> (every agent on the board) | inbox --wait 300 (wait "
+            "for a reply) | new <directory> <task> (start a new agent in its own "
+            "terminal) | task list | task add <directory> <title> <details> (queue work "
+            "on the shared task list for the task runner). <agent> = its folder name or "
+            "a few words of its title." % tool,
             "Team rules:\n"
             "- Before you research or build something, check the teammates above. If "
             "one already did it or is doing it, `read` its conversation and reuse the "
@@ -130,14 +183,8 @@ def main():
             "- When you finish something a teammate is waiting for, `tell` it: one "
             "complete message with the paths or facts it needs.",
         ]
-        rules_file = os.environ.get("OFFICE_TEAM_FILE") or os.path.join(here, "team.md")
-        try:
-            with open(rules_file, encoding="utf-8") as f:
-                extra = f.read().strip()
-            if extra:
-                parts.append("This team's own rules:\n" + extra[:4000])
-        except OSError:
-            pass
+        if rules_text:
+            parts.append("This team's own rules:\n" + rules_text[:4000])
         out.write(("\n\n".join(p for p in parts if p) + "\n").encode("utf-8"))
         return
 
@@ -168,9 +215,17 @@ def main():
         return
 
     # UserPromptSubmit: also mention the team when it changed since this session last
-    # saw it (someone arrived, left, or moved to a new subject)
-    roster = _team(False) if briefing else ""
-    block = "\n\n".join(p for p in (roster, text) if p)
+    # saw it (someone arrived, left, or moved to a new subject), and hand over the
+    # team's own rules again when the file changed since this session last read it
+    roster, rules = "", ""
+    if briefing:
+        reply = _team(False)
+        roster = reply.get("text") or ""
+        if reply.get("rules_changed") and rules_text:
+            rules = ("[The Office] The team's own rules changed since you last read "
+                     "them. Follow this version from now on:\n" + rules_text[:4000])
+    triggers = "\n".join(prompt_triggers(data.get("prompt")))
+    block = "\n\n".join(p for p in (roster, rules, text, triggers) if p)
     if block:
         out.write((block + "\n").encode("utf-8"))
 
