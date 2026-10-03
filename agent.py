@@ -4,6 +4,7 @@
     python agent.py who                       who is working on what, right now
     python agent.py read <agent> [n]          the last n messages of another agent's conversation
     python agent.py tell <agent> <message>    leave a message for another agent
+    python agent.py tell all <message>        leave the same message for every agent on the board
     python agent.py inbox [--wait SECONDS]    messages for you (optionally wait for one)
     python agent.py new <directory> <task>    start a new agent (its own terminal) on a task
     python agent.py task list                 the shared task list
@@ -93,6 +94,19 @@ def tell(target, text):
     if not r.get("ok"):
         print("error: %s" % r.get("error"))
         return 1
+    if r.get("broadcast"):
+        recs = r.get("recipients") or []
+        busy = [x["label"] for x in recs if x.get("mid_turn")]
+        idle = [x["label"] for x in recs if not x.get("mid_turn")]
+        print("Message left for %d agent(s)." % len(recs))
+        if busy:
+            print("Mid-turn, will read it when the current turn ends: %s."
+                  % "; ".join(busy))
+        if idle:
+            print("IDLE at their prompt, will read it with their next prompt (this "
+                  "alone does not wake them; SendMessage from ListAgents does): %s."
+                  % "; ".join(idle))
+        return 0
     rec = r.get("recipient")
     if not rec:
         print("Message left. That agent is not on the board right now; it gets the "
