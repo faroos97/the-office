@@ -15,14 +15,15 @@ you relaying between terminals.
 Zero dependencies (Python 3.8+ standard library only). Listens on 127.0.0.1 only.
 Fed by Claude Code hooks that POST here on every session event (see README.md).
 
-    python office.py                  # serve on http://127.0.0.1:8787
+    python office.py                  # serve on http://127.0.0.1:8741
     python office.py --port 9000      # or OFFICE_PORT=9000
     python office.py --allow-spawn    # also allow starting new agents
 
-Then open http://127.0.0.1:8787 and add the hook (README) so sessions report in.
+Then open http://127.0.0.1:8741 and add the hook (README) so sessions report in.
 """
 import argparse
 import datetime
+import hmac
 import json
 import os
 import re
@@ -35,7 +36,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
 HOST = "127.0.0.1"           # localhost only, always
-DEFAULT_PORT = 8787
+DEFAULT_PORT = 8741
 DB_PATH = os.environ.get("OFFICE_DB") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "office.db")
 
@@ -232,6 +233,10 @@ def _db():
         conn.execute("ALTER TABLE agents ADD COLUMN roster_sig TEXT")
     if "rules_sig" not in have:
         conn.execute("ALTER TABLE agents ADD COLUMN rules_sig TEXT")
+    if "pid" not in have:
+        conn.execute("ALTER TABLE agents ADD COLUMN pid INTEGER")
+    if "state_since" not in have:
+        conn.execute("ALTER TABLE agents ADD COLUMN state_since TEXT")
     if "check_name" not in {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}:
         conn.execute("ALTER TABLE tasks ADD COLUMN check_name TEXT")
     return conn
@@ -262,6 +267,15 @@ def _push_recent(existing, line):
     return json.dumps(items[:RECENT_CAP], ensure_ascii=False)
 
 
+def _is_idle_notice(payload):
+    """A Notification that only says the session is idle at its prompt."""
+    kind = (payload.get("notification_type") or "").strip().lower()
+    if kind:
+        return kind == "idle_prompt"
+    return (payload.get("message") or "").strip().lower().startswith(
+        "claude is waiting for your input")
+
+
 def report(payload):
     """Ingest one Claude Code hook event and upsert the session's desk."""
     session_id = (payload.get("session_id") or "").strip()
@@ -277,6 +291,11 @@ def report(payload):
             return {"ok": True, "removed": session_id}
 
         state, needs_you = _EVENT_MAP.get(event, ("working", False))
+        if event == "Notification" and _is_idle_notice(payload):
+            # Claude Code sends "waiting for your input" about a minute after a turn
+            # ended. That is an agent idle at its prompt (waiting), not one stuck on a
+            # permission (blocked); painting it red hid the real blocks.
+            state, needs_you = "waiting", True
         tool = payload.get("tool_name")
 
         task = None
@@ -286,7 +305,9 @@ def report(payload):
                          event in ("UserPromptSubmit", "SessionStart")):
             task = payload.get("task") or titleize(payload.get("prompt"))
 
-        if event == "Notification":
+        if event == "Notification" and state == "waiting":
+            activity = "finished, waiting for you"
+        elif event == "Notification":
             activity = (payload.get("message") or "needs your attention").strip()[:160]
         elif event == "Stop":
             activity = "finished, waiting for you"
@@ -314,11 +335,18 @@ def report(payload):
                   "needs_you": 1 if needs_you else 0, "activity": activity,
                   "last_tool": tool, "model": payload.get("model"),
                   "transcript_path": payload.get("transcript_path")}
+        try:
+            fields["pid"] = int(payload["pid"]) if payload.get("pid") else None
+        except (TypeError, ValueError):
+            pass
         fields = {k: v for k, v in fields.items() if v is not None}
 
         with conn:
-            row = conn.execute("SELECT recent FROM agents WHERE session_id=?",
+            row = conn.execute("SELECT recent, state FROM agents WHERE session_id=?",
                                (session_id,)).fetchone()
+            if row is None or row["state"] != state:
+                fields["state_since"] = datetime.datetime.now(datetime.timezone.utc).strftime(
+                    "%Y-%m-%d %H:%M:%S")
             if recent_line is not None:
                 fields["recent"] = _push_recent(row["recent"] if row else None,
                                                 recent_line)
@@ -337,17 +365,60 @@ def report(payload):
         conn.close()
 
 
+def _pid_alive(pid):
+    """Is the process `pid` still running? True when unsure: a wrong 'dead' would take a
+    live agent off the board."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return True
+    if pid <= 0:
+        return True
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+            k32 = ctypes.windll.kernel32
+            h = k32.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
+            if not h:
+                return k32.GetLastError() == 5            # 5 = access denied: alive
+            try:
+                code = ctypes.c_ulong()
+                if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
+                    return True
+                return code.value == 259                 # STILL_ACTIVE
+            finally:
+                k32.CloseHandle(h)
+        except Exception:
+            return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def board():
-    """The whole office, aged and ranked (loudest first)."""
+    """The whole office, aged and ranked (loudest first). A desk whose session process
+    is gone (its window was closed or killed, so no SessionEnd was ever sent) is removed
+    here, not an hour later."""
     conn = _db()
     try:
         with conn:
             conn.execute("DELETE FROM agents WHERE"
                          " (julianday('now')-julianday(updated_at))*86400 > ?",
                          (GHOST_SECS,))
+            for r in conn.execute("SELECT session_id, pid FROM agents"
+                                  " WHERE pid IS NOT NULL").fetchall():
+                if not _pid_alive(r["pid"]):
+                    conn.execute("DELETE FROM agents WHERE session_id=?",
+                                 (r["session_id"],))
         rows = conn.execute(
             "SELECT *, CAST((julianday('now')-julianday(updated_at))*86400 AS INTEGER)"
-            " AS age_secs FROM agents ORDER BY updated_at DESC").fetchall()
+            " AS age_secs, CAST((julianday('now')-julianday(COALESCE(state_since,"
+            "updated_at)))*86400 AS INTEGER) AS since_secs FROM agents"
+            " ORDER BY updated_at DESC").fetchall()
     finally:
         conn.close()
 
@@ -368,6 +439,7 @@ def board():
             "activity": r.get("activity"), "last_tool": r.get("last_tool"),
             "model": r.get("model"), "needs_you": bool(r.get("needs_you")),
             "recent": recent, "age_secs": int(age),
+            "state_secs": int(r.get("since_secs") or age), "pid": r.get("pid"),
         })
     agents.sort(key=lambda a: (_RANK.get(a["state"], 9), a["age_secs"]))
     needs = [a for a in agents if a["state"] in ("blocked", "waiting")]
@@ -533,6 +605,35 @@ def conversation(target, limit=CONVO_MAX_MSGS):
             m["text"] = "…" + m["text"][-CONVO_MSG_CHARS:]
     head["messages"] = msgs[-int(limit):]
     return head
+
+
+def status():
+    """One call for the floor manager: every agent's state, title, what it last asked
+    (when blocked: the permission or question it is stuck on), how long it has been in
+    that state, and the last message it wrote. Loudest first, like the board."""
+    out = []
+    for a in board()["agents"]:
+        if a["session_id"].startswith("task-"):
+            continue
+        last = ""
+        try:
+            for m in reversed(conversation(a["session_id"], 8).get("messages") or []):
+                if m["role"] == "assistant" and (m.get("text") or "").strip():
+                    last = m["text"].strip()
+                    break
+        except Exception:
+            pass
+        asked = a["activity"] if a["state"] in ("blocked", "waiting") else ""
+        out.append({
+            "session_id": a["session_id"], "name": a["name"], "title": a["task"],
+            "state": a["state"], "last_ask": asked, "activity": a["activity"],
+            "in_state_secs": a["state_secs"], "silent_secs": a["age_secs"],
+            "blocked_secs": a["state_secs"] if a["state"] == "blocked" else 0,
+            "cwd": a["cwd"], "pid": a["pid"], "model": a["model"],
+            "is_manager": a["is_manager"], "inbox": a["inbox"],
+            "last_message": last[:1500]})
+    return {"agents": out, "count": len(out),
+            "blocked": sum(1 for x in out if x["state"] == "blocked")}
 
 
 # ---------------------------------------------------------------- team awareness
@@ -1169,6 +1270,32 @@ def _team_folder(cwd):
         folder = parent
 
 
+def _agent_flags(extra, area, task, rules=True):
+    """The claude flags for a new agent: config's agent_args (or manager_args), the
+    model that config's model_rules pick for this folder and task, and the operator's
+    own permission mode, so that a session nobody is watching does not stop at a
+    permission prompt. The mode is named in config ("permission_mode", normally "auto");
+    it only selects how the operator's existing permission rules are applied, and is
+    skipped when the args already name one."""
+    flags = [str(a) for a in extra]
+    for rule in (_config().get("model_rules") or []) if rules else []:
+        try:
+            if re.search(rule["match"], "%s %s" % (area or "", task or ""), re.I):
+                if "--model" in flags:
+                    i = flags.index("--model")
+                    del flags[i:i + 2]
+                flags += ["--model", str(rule["model"])]
+                break
+        except (KeyError, TypeError, re.error):
+            continue
+    mode = _config().get("permission_mode")
+    if mode and "--permission-mode" not in flags and not any(
+            f.startswith("--dangerously") or f == "--allow-dangerously-skip-permissions"
+            for f in flags):
+        flags += ["--permission-mode", str(mode)]
+    return flags
+
+
 def spawn_agent(payload):
     """Open a new terminal window running an interactive `claude` session for the folder
     `cwd`, started on `task`. This is how you (from the board) or an agent (from
@@ -1222,7 +1349,9 @@ def spawn_agent(payload):
                        % (area.replace("\\", "/"), payload.get("task") or ""))
     # one line, no quotes: the task is passed as a single argument, never as shell text
     task = " ".join((payload.get("task") or "").split()).replace('"', "'")[:2000]
-    args = [_claude_bin()] + [str(a) for a in extra] + ([task] if task else [])
+    args = [_claude_bin()] + _agent_flags(extra, area or cwd, task,
+                                         payload.get("role") != "manager") + (
+        [task] if task else [])
     # If office.py itself was started from inside a Claude Code session, its per-session
     # variables must not leak into the new agent (it would think it is a child session).
     env = {k: v for k, v in os.environ.items() if k not in _SESSION_ENV}
@@ -1245,6 +1374,28 @@ def spawn_agent(payload):
 
 
 # ---------------------------------------------------------------- http server
+def _remote_token():
+    """The access token for tailnet devices: office.token next to this file, created on
+    first need. Only when config.json names a remote_host."""
+    path = os.environ.get("OFFICE_TOKEN_FILE") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "office.token")
+    try:
+        with open(path, encoding="utf-8") as f:
+            tok = f.read().strip()
+        if len(tok) >= 24:
+            return tok
+    except OSError:
+        pass
+    import secrets
+    tok = secrets.token_urlsafe(32)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(tok)
+    except OSError:
+        return None
+    return tok
+
+
 def _read_page():
     p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "board.html")
     with open(p, encoding="utf-8") as f:
@@ -1282,12 +1433,70 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         return origin is None or origin.strip().lower() in {"http://" + n for n in names}
 
+    def _remote(self):
+        """True when the request came through `tailscale serve` from another device on
+        the operator's tailnet and carries the access token. The server itself stays on
+        127.0.0.1; tailscale serve (HTTPS, tailnet only) forwards to it with the
+        original Host. Only the one host named in config.json "remote_host" is
+        accepted, never a Funnel request (public internet), and only with the token
+        (cookie, bearer header or ?token=)."""
+        host = (_config().get("remote_host") or "").strip().lower()
+        if not host or (self.headers.get("Host") or "").strip().lower() != host:
+            return False
+        if self.headers.get("Tailscale-Funnel-Request"):
+            return False
+        origin = self.headers.get("Origin")
+        if origin is not None and origin.strip().lower() != "https://" + host:
+            return False
+        good = _remote_token()
+        if not good:
+            return False
+        got = self._token()
+        return bool(got) and hmac.compare_digest(got, good)
+
+    def _token(self):
+        auth = self.headers.get("Authorization") or ""
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == "office_token":
+                return v
+        q = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+        return (q.get("token") or [""])[0]
+
+    def _allowed(self):
+        """Local programs and the local board, or a tailnet device holding the token.
+        Answers 403 itself when neither."""
+        if self._local() or self._remote():
+            return True
+        self._send(403, {"error": "local requests only, or a tailnet device with the "
+                                  "access token"}, "application/json")
+        return False
+
     def do_GET(self):
-        if not self._local():
-            return self._send(403, {"error": "local requests only"}, "application/json")
+        if not self._allowed():
+            return
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
-            return self._send(200, _read_page(), "text/html; charset=utf-8")
+            body = _read_page().encode("utf-8")
+            remote = not self._local()
+            first = remote and "token=" in self.path   # opened from the token link
+            self.send_response(302 if first else 200)
+            if first:
+                self.send_header("Location", "/")      # drop the token from the address bar
+                body = b""
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            if remote:
+                # remember the token for the API calls the page makes; not readable by JS
+                self.send_header("Set-Cookie", "office_token=%s; Path=/; Secure; HttpOnly;"
+                                 " SameSite=Strict; Max-Age=31536000" % self._token())
+            self.end_headers()
+            return self.wfile.write(body)
+        if path == "/api/status":
+            return self._send(200, status(), "application/json; charset=utf-8")
         if path == "/api/agents":
             return self._send(200, board(), "application/json; charset=utf-8")
         if path == "/api/tasks":
@@ -1304,8 +1513,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send(404, {"error": "not found"}, "application/json")
 
     def do_POST(self):
-        if not self._local():
-            return self._send(403, {"error": "local requests only"}, "application/json")
+        if not self._allowed():
+            return
         path = self.path.split("?", 1)[0]
         routes = {
             "/api/agents/report": report,
@@ -1342,7 +1551,20 @@ def main():
     args = ap.parse_args()
     if args.allow_spawn:
         os.environ["OFFICE_ALLOW_SPAWN"] = "1"
-    httpd = ThreadingHTTPServer((HOST, args.port), Handler)
+    if sys.platform.startswith("win"):
+        # Windows lets a second program listen on a port that is already in use (wrangler
+        # dev's default is 8787), so requests would go to either. Refuse that: fail loudly.
+        class _Server(ThreadingHTTPServer):
+            allow_reuse_address = False
+
+            def server_bind(self):
+                import socket
+                self.socket.setsockopt(socket.SOL_SOCKET,
+                                       getattr(socket, "SO_EXCLUSIVEADDRUSE", -5), 1)
+                super().server_bind()
+        httpd = _Server((HOST, args.port), Handler)
+    else:
+        httpd = ThreadingHTTPServer((HOST, args.port), Handler)
     print("The Office running at http://%s:%d  (Ctrl-C to stop)%s" % (
         HOST, args.port,
         "  [new agents: on]" if os.environ.get("OFFICE_ALLOW_SPAWN") == "1" else ""))

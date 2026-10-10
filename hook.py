@@ -31,7 +31,7 @@ Privacy: forwards the event, cwd, tool name, transcript path, and a Notification
 message. Prompts are forwarded only with OFFICE_SEND_PROMPT=1 (first 400 chars, to
 localhost, as a fallback title).
 
-Env: OFFICE_PORT (8787) · OFFICE_SEND_PROMPT (off) · OFFICE_BRIEF=0 to skip step 2
+Env: OFFICE_PORT (8741) · OFFICE_SEND_PROMPT (off) · OFFICE_BRIEF=0 to skip step 2
 · OFFICE_TEAM_FILE · OFFICE_CONFIG (config.json next to this file).
 """
 import hashlib
@@ -111,16 +111,20 @@ def main():
         "tool_name": data.get("tool_name"),
         "transcript_path": data.get("transcript_path"),
     }
+    pid = os.environ.get("CLAUDE_PID", "")
+    if pid.isdigit():
+        payload["pid"] = int(pid)   # lets the board drop this desk when the process is gone
     if event == "Notification":
         payload["message"] = data.get("message")
+        payload["notification_type"] = data.get("notification_type")
     if event == "UserPromptSubmit" and os.environ.get("OFFICE_SEND_PROMPT") == "1":
         p = data.get("prompt")
         if p:
             payload["prompt"] = str(p)[:400]
 
-    port = os.environ.get("OFFICE_PORT", "8787")
+    port = os.environ.get("OFFICE_PORT", "8741")
     if not str(port).isdigit():
-        port = "8787"
+        port = "8741"
     base = "http://127.0.0.1:%s" % port
 
     def _post(path, obj, wait=TIMEOUT):

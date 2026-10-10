@@ -143,7 +143,7 @@ The task list is the memory, not the manager. When its session gets long it writ
 2. Start the server:
 
    ```bash
-   python office.py --allow-spawn     # http://127.0.0.1:8787
+   python office.py --allow-spawn     # http://127.0.0.1:8741
    ```
 
    Leave out `--allow-spawn` if you do not want the board or the agents to start new sessions.
@@ -165,7 +165,7 @@ The task list is the memory, not the manager. When its session gets long it writ
 
    [`examples/settings.hooks.json`](examples/settings.hooks.json) is ready to copy. On Windows, use the full path to `python.exe` and escape the backslashes.
 
-4. Open http://127.0.0.1:8787 and start a Claude Code session.
+4. Open http://127.0.0.1:8741 and start a Claude Code session.
 
 Hooks apply to sessions started after you add them. Restart any terminal that was already open.
 
@@ -275,9 +275,9 @@ The parts worth knowing:
 
 | Setting | Default | What it does |
 |---|---|---|
-| `--port` / `OFFICE_PORT` | `8787` | Port for the server, the hook and `agent.py`. |
+| `--port` / `OFFICE_PORT` | `8741` | Port for the server, the hook and `agent.py`. |
 | `--allow-spawn` / `OFFICE_ALLOW_SPAWN=1` | off | Let the board and agents start new sessions and run tasks. |
-| `config.json` / `OFFICE_CONFIG` | none | `worker_cmd`, `kinds`, `parallel` (tasks at once, 1 to 8), `checks` (name to command), `agent_args`, `manager_args`, `manager_dir` (the folder the manager starts in), `prompt_triggers` (standing orders, see [Teach it your team](#teach-it-your-team)). A file that does not parse stops the runner rather than being ignored. |
+| `config.json` / `OFFICE_CONFIG` | none | `worker_cmd`, `kinds`, `parallel` (tasks at once, 1 to 8), `checks` (name to command), `agent_args`, `manager_args`, `permission_mode` (passed to every agent as `--permission-mode`, e.g. `auto`, so unattended agents do not stop at a prompt), `model_rules` (`[{"match": regex on folder + task, "model": ...}]`, first match replaces the `--model` of `agent_args`), `remote_host` (the tailnet name `tailscale serve` publishes the board under; enables token-protected access from your own devices), `manager_dir` (the folder the manager starts in), `prompt_triggers` (standing orders, see [Teach it your team](#teach-it-your-team)). A file that does not parse stops the runner rather than being ignored. |
 | `OFFICE_WORKER_ARGS` | none | Extra arguments for the built-in `claude -p` worker. |
 | `OFFICE_WORKER_TIMEOUT` | `3600` | Seconds before a worker is stopped. |
 | `OFFICE_CHECK_TIMEOUT` | `900` | Seconds before a check command is stopped. |
@@ -297,3 +297,10 @@ The tests need nothing but Python and start no Claude session: `python -m unitte
 ## License
 
 MIT, see [LICENSE](LICENSE).
+
+## Status for a manager, and remote access
+
+- `python agent.py status` (or `GET /api/status`, `--json`) lists every agent: state, title, last ask, time in that state, last message.
+- A session whose process is gone is dropped from the board at once (the hook reports the Claude pid).
+- "Claude is waiting for your input" is the idle notice, shown as *waiting*, not *blocked*. Only a permission or question is *blocked*.
+- From your phone: the server stays on 127.0.0.1; `tailscale serve --bg --https=443 http://127.0.0.1:8741` publishes it on your tailnet only (never Funnel). Set `remote_host` in config.json, then open `https://<host>/?token=<contents of office.token>` once per device. Without the token, or via Funnel, requests get 403. `scripts/install_office_task.ps1` registers the logon task.
