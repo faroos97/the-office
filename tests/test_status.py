@@ -51,6 +51,19 @@ class Reaping(unittest.TestCase):
         self.assertEqual(ids, {"live", "nopid"})
 
 
+class Silent(unittest.TestCase):
+    def test_idle_live_process_stays_past_the_ghost_age(self):
+        clear()
+        office.report({"session_id": "idle", "hook_event_name": "Stop", "cwd": _TMP,
+                       "pid": os.getpid()})
+        office.report({"session_id": "old", "hook_event_name": "Stop", "cwd": _TMP})
+        conn = office._db()
+        with conn:
+            conn.execute("UPDATE agents SET updated_at=datetime('now','-5 hours')")
+        conn.close()
+        self.assertEqual([a["session_id"] for a in office.board()["agents"]], ["idle"])
+
+
 class Status(unittest.TestCase):
     def setUp(self):
         clear()

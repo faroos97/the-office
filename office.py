@@ -406,7 +406,9 @@ def board():
     conn = _db()
     try:
         with conn:
-            conn.execute("DELETE FROM agents WHERE"
+            # silence alone does not remove a desk whose process is known and alive: an
+            # idle agent at its prompt sends nothing for hours
+            conn.execute("DELETE FROM agents WHERE pid IS NULL AND"
                          " (julianday('now')-julianday(updated_at))*86400 > ?",
                          (GHOST_SECS,))
             for r in conn.execute("SELECT session_id, pid FROM agents"
