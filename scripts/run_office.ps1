@@ -9,21 +9,13 @@ $log = Join-Path $here 'office-server.log'
 
 function Log($m) { "$(Get-Date -Format s) $m" | Add-Content -Path $log -Encoding utf8 }
 
-# Tailnet-only HTTPS in front of the loopback server. Idempotent; tailscaled keeps the config
-# across reboots. Done in a background job with a timeout per attempt: `tailscale serve` waits
-# forever when Serve is not yet enabled on the tailnet, and that must not hold the server back.
-$null = Start-Job -ArgumentList $port, $log -ScriptBlock {
-    param($port, $log)
-    for ($i = 0; $i -lt 60; $i++) {
-        $p = Start-Process -FilePath 'tailscale' -ArgumentList "serve --bg --https=443 http://127.0.0.1:$port" `
-            -WindowStyle Hidden -PassThru
-        if ($p.WaitForExit(20000)) {
-            if ($p.ExitCode -eq 0) { "$(Get-Date -Format s) tailscale serve ok" | Add-Content $log; break }
-        } else { try { $p.Kill() } catch {} }
-        "$(Get-Date -Format s) tailscale serve not ready (is Serve enabled on the tailnet?); retrying" | Add-Content $log
-        Start-Sleep -Seconds 60
-    }
-}
+# Tailnet-only HTTPS in front of the loopback server: scripts\serve_tailnet.ps1, as its own
+# hidden process, so that `tailscale serve` waiting on the operator never holds the server back.
+# It stops by itself when this script (and so the server) is gone. Its own log file: the
+# server's log is held open by the redirection below, and a second writer is refused.
+Start-Process -FilePath 'powershell.exe' -WindowStyle Hidden -ArgumentList @(
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'serve_tailnet.ps1'),
+    '-Port', $port, '-Log', (Join-Path $here 'office-serve.log'), '-ParentPid', $PID)
 
 # The server, in the foreground so the task shows as Running while it lives.
 $env:OFFICE_PORT = "$port"
