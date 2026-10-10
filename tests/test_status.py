@@ -22,6 +22,8 @@ os.environ["OFFICE_TOKEN_FILE"] = os.path.join(_TMP, "office.token")
 sys.path.insert(0, ROOT)
 import office  # noqa: E402
 
+office._PROCESS_NAME = "python"   # the tests' "live agent" is this interpreter
+
 
 def write_config(**cfg):
     with open(os.environ["OFFICE_CONFIG"], "w", encoding="utf-8") as f:
@@ -132,6 +134,55 @@ class Flags(unittest.TestCase):
                          ["--model", "sonnet"])
 
 
+class SpawnCommand(unittest.TestCase):
+    """What `new` really runs, with the terminal launch captured instead of opened."""
+
+    def setUp(self):
+        self.calls = []
+        self.popen = office.subprocess.Popen
+        office.subprocess.Popen = lambda args, **kw: self.calls.append((args, kw))
+        os.environ["OFFICE_ALLOW_SPAWN"] = "1"
+        self.folder = os.path.join(_TMP, "PORTFOLIO")
+        for sub in ("mockups", "clients"):
+            os.makedirs(os.path.join(self.folder, sub), exist_ok=True)
+        os.makedirs(os.path.join(self.folder, ".claude"), exist_ok=True)
+        with open(os.path.join(self.folder, ".claude", "settings.json"), "w") as f:
+            json.dump({"hooks": {"Stop": [{"hooks": [{"command": "python %s/hook.py"
+                                                       % os.path.basename(ROOT)}]}]}}, f)
+        write_config(permission_mode="auto", agent_args=["--model", "sonnet"],
+                     manager_args=["--model", "opus"],
+                     model_rules=[{"match": r"mockups|demos?", "model": "claude-fable-5-1"}])
+
+    def tearDown(self):
+        office.subprocess.Popen = self.popen
+
+    def argv(self):
+        args = self.calls[-1][0]
+        return args[args.index("cmd", 1) + 2:] if sys.platform.startswith("win") else args
+
+    def test_demo_agent_gets_fable_and_auto_mode(self):
+        r = office.spawn_agent({"cwd": os.path.join(self.folder, "mockups"), "task": "a site"})
+        self.assertTrue(r["ok"], r)
+        argv = self.argv()
+        self.assertEqual(argv[1:5], ["--model", "claude-fable-5-1", "--permission-mode", "auto"])
+        self.assertTrue(argv[5].startswith("Your area is the folder"))
+        self.assertEqual(os.path.normcase(self.calls[-1][1]["cwd"]), os.path.normcase(self.folder))
+
+    def test_other_agent_keeps_sonnet_with_auto_mode(self):
+        office.spawn_agent({"cwd": os.path.join(self.folder, "clients"), "task": "fix cart"})
+        self.assertEqual(self.argv()[1:5], ["--model", "sonnet", "--permission-mode", "auto"])
+
+    def test_manager_keeps_its_own_model(self):
+        office.spawn_agent({"cwd": os.path.join(self.folder, "mockups"), "task": "demo",
+                            "role": "manager"})
+        self.assertEqual(self.argv()[1:5], ["--model", "opus", "--permission-mode", "auto"])
+
+    def test_no_session_env_leaks(self):
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "parent"
+        office.spawn_agent({"cwd": self.folder, "task": "x"})
+        self.assertNotIn("CLAUDE_CODE_SESSION_ID", self.calls[-1][1]["env"])
+
+
 class Remote(unittest.TestCase):
     HOST = "box.example.ts.net"
 
@@ -179,6 +230,25 @@ class Remote(unittest.TestCase):
     def test_funnel_requests_are_refused_even_with_token(self):
         auth = {"Authorization": "Bearer " + self.token, "Tailscale-Funnel-Request": "?1"}
         self.assertEqual(self.call("/api/agents", headers=auth)[0], 403)
+
+    def test_forwarded_host_is_accepted_and_forwarded_local_host_is_not_local(self):
+        # tailscale serve may hand us Host=<backend> and X-Forwarded-Host=<tailnet name>
+        fwd = {"X-Forwarded-Host": self.HOST, "X-Forwarded-Proto": "https",
+               "X-Forwarded-For": "100.64.0.9"}
+        local = "127.0.0.1:%d" % self.port
+        self.assertEqual(self.call("/api/status", host=local, headers=fwd)[0], 403)
+        ok = dict(fwd, Authorization="Bearer " + self.token)
+        self.assertEqual(self.call("/api/status", host=local, headers=ok)[0], 200)
+
+    def test_pid_of_another_program_counts_as_dead(self):
+        other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            self.assertTrue(office._pid_alive(other.pid))
+            office._PROCESS_NAME = "claude"
+            self.assertFalse(office._pid_alive(other.pid))
+        finally:
+            office._PROCESS_NAME = "python"
+            other.kill()
 
     def test_other_host_is_refused(self):
         auth = {"Authorization": "Bearer " + self.token}

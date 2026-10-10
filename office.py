@@ -365,9 +365,13 @@ def report(payload):
         conn.close()
 
 
+_PROCESS_NAME = "claude"     # what the agent's process is called (its image name)
+
+
 def _pid_alive(pid):
-    """Is the process `pid` still running? True when unsure: a wrong 'dead' would take a
-    live agent off the board."""
+    """Is the Claude Code process `pid` still running? True when unsure: a wrong 'dead'
+    would take a live agent off the board. A pid that now belongs to some other program
+    (Windows and Linux reuse pids) counts as dead."""
     try:
         pid = int(pid)
     except (TypeError, ValueError):
@@ -377,15 +381,22 @@ def _pid_alive(pid):
     if sys.platform.startswith("win"):
         try:
             import ctypes
-            k32 = ctypes.windll.kernel32
+            from ctypes import wintypes
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
             h = k32.OpenProcess(0x1000, False, pid)   # PROCESS_QUERY_LIMITED_INFORMATION
             if not h:
-                return k32.GetLastError() == 5            # 5 = access denied: alive
+                return ctypes.get_last_error() == 5    # 5 = access denied: it exists
             try:
-                code = ctypes.c_ulong()
+                code = wintypes.DWORD()
                 if not k32.GetExitCodeProcess(h, ctypes.byref(code)):
                     return True
-                return code.value == 259                 # STILL_ACTIVE
+                if code.value != 259:                  # STILL_ACTIVE
+                    return False
+                buf = ctypes.create_unicode_buffer(1024)
+                size = wintypes.DWORD(len(buf))
+                if k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+                    return _PROCESS_NAME in os.path.basename(buf.value).lower()
+                return True
             finally:
                 k32.CloseHandle(h)
         except Exception:
@@ -396,7 +407,11 @@ def _pid_alive(pid):
         return False
     except OSError:
         return True
-    return True
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as f:
+            return _PROCESS_NAME.encode() in f.read().lower()
+    except OSError:
+        return True            # no /proc (macOS): alive is all we know
 
 
 def board():
@@ -1404,6 +1419,13 @@ def _read_page():
         return f.read()
 
 
+class _Quiet:
+    """Mixed into the server: a browser or hook that hung up mid-request is normal."""
+    def handle_error(self, request, client_address):
+        if not isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError)):
+            super().handle_error(request, client_address)
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "TheOffice/1.0"
 
@@ -1428,12 +1450,20 @@ class Handler(BaseHTTPRequestHandler):
         happens to be open in the operator's browser must not be able to call it, and
         neither may a DNS name that someone pointed at 127.0.0.1. A browser names the
         calling page in Origin; local programs (hook.py, agent.py, runner.py) send none."""
+        if self._forwarded():
+            return False
         port = self.server.server_address[1]
         names = {"%s:%d" % (h, port) for h in ("127.0.0.1", "localhost")}
         if (self.headers.get("Host") or "").strip().lower() not in names:
             return False
         origin = self.headers.get("Origin")
         return origin is None or origin.strip().lower() in {"http://" + n for n in names}
+
+    def _forwarded(self):
+        """Did this request pass through a proxy (tailscale serve, or anything else)?"""
+        return any(self.headers.get(h) for h in (
+            "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto",
+            "Tailscale-User-Login", "Tailscale-Funnel-Request"))
 
     def _remote(self):
         """True when the request came through `tailscale serve` from another device on
@@ -1443,7 +1473,11 @@ class Handler(BaseHTTPRequestHandler):
         accepted, never a Funnel request (public internet), and only with the token
         (cookie, bearer header or ?token=)."""
         host = (_config().get("remote_host") or "").strip().lower()
-        if not host or (self.headers.get("Host") or "").strip().lower() != host:
+        if not host:
+            return False
+        seen = {(self.headers.get(h) or "").strip().lower().split(":")[0]
+                for h in ("Host", "X-Forwarded-Host")}
+        if host not in seen:
             return False
         if self.headers.get("Tailscale-Funnel-Request"):
             return False
@@ -1556,7 +1590,7 @@ def main():
     if sys.platform.startswith("win"):
         # Windows lets a second program listen on a port that is already in use (wrangler
         # dev's default is 8787), so requests would go to either. Refuse that: fail loudly.
-        class _Server(ThreadingHTTPServer):
+        class _Server(_Quiet, ThreadingHTTPServer):
             allow_reuse_address = False
 
             def server_bind(self):
@@ -1566,7 +1600,9 @@ def main():
                 super().server_bind()
         httpd = _Server((HOST, args.port), Handler)
     else:
-        httpd = ThreadingHTTPServer((HOST, args.port), Handler)
+        class _Server(_Quiet, ThreadingHTTPServer):
+            pass
+        httpd = _Server((HOST, args.port), Handler)
     print("The Office running at http://%s:%d  (Ctrl-C to stop)%s" % (
         HOST, args.port,
         "  [new agents: on]" if os.environ.get("OFFICE_ALLOW_SPAWN") == "1" else ""))

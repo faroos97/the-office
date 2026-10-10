@@ -29,6 +29,9 @@ $null = Start-Job -ArgumentList $port, $log -ScriptBlock {
 $env:OFFICE_PORT = "$port"
 Set-Location $here
 Log "starting office.py"
-& $py (Join-Path $here 'office.py') --port $port --allow-spawn *>> $log
+# Through cmd.exe so the redirection appends plain UTF-8 bytes (PowerShell 5.1's own
+# *>> writes UTF-16, which makes the log unreadable next to Add-Content's lines).
+$script = Join-Path $here 'office.py'
+& cmd.exe /c "`"$py`" -u `"$script`" --port $port --allow-spawn >> `"$log`" 2>&1"
 Log "office.py exited ($LASTEXITCODE)"
 exit $LASTEXITCODE
