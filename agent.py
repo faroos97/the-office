@@ -2,6 +2,8 @@
 """agent.py — how a Claude Code agent sees and talks to the other agents in The Office.
 
     python agent.py who                       who is working on what, right now
+    python agent.py status [--json]           for the manager: every agent's state, title,
+                                              last ask, time in that state, last message
     python agent.py read <agent> [n]          the last n messages of another agent's conversation
     python agent.py tell <agent> <message>    leave a message for another agent
     python agent.py tell all <message>        leave the same message for every agent on the board
@@ -29,7 +31,7 @@ import time
 import urllib.parse
 import urllib.request
 
-BASE = "http://127.0.0.1:%s" % (os.environ.get("OFFICE_PORT") or "8787")
+BASE = "http://127.0.0.1:%s" % (os.environ.get("OFFICE_PORT") or "8741")
 ME = os.environ.get("CLAUDE_CODE_SESSION_ID") or ""
 
 
@@ -63,6 +65,25 @@ def who():
         print("    %s, %s ago: %s   id %s" % (
             a["state"], _age(a["age_secs"]), a.get("activity") or "-",
             a["session_id"][:8]))
+
+
+def status(as_json=False):
+    data = _get("/api/status")
+    if as_json:
+        print(json.dumps(data, indent=2, ensure_ascii=False))
+        return 0
+    print("%d agent(s), %d blocked on the operator." % (data["count"], data["blocked"]))
+    for a in data["agents"]:
+        print("\n[%s] %s  -- %s for %s%s" % (
+            a["name"], a.get("title") or "(untitled)", a["state"],
+            _age(a["in_state_secs"]), "  (manager)" if a["is_manager"] else ""))
+        if a["last_ask"]:
+            print("    last ask: %s" % a["last_ask"])
+        if a["last_message"]:
+            print("    last message: %s" % " ".join(a["last_message"].split())[:400])
+        print("    id %s  model %s  silent %s" % (
+            a["session_id"][:8], a.get("model") or "-", _age(a["silent_secs"])))
+    return 0
 
 
 def read(target, n=12):
@@ -399,6 +420,8 @@ def main(argv):
     try:
         if cmd == "who":
             return who() or 0
+        if cmd == "status":
+            return status("--json" in argv[2:])
         if cmd == "read" and len(argv) >= 3:
             n = int(argv[3]) if len(argv) > 3 and argv[3].isdigit() else 12
             return read(argv[2], n)

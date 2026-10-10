@@ -61,3 +61,6 @@ When the goal is met, or you are waiting on the operator and nothing else can mo
 - what needs the operator, as questions they can answer in a word.
 
 The task list is the memory, not you. If this session has grown long, write the state into the task list (every piece of open work is a task with an owner), tell the operator to start a fresh manager, and run `manager stop`. A new manager reads the list and carries on.
+
+## One-call status
+`agent.py status` prints every agent's state, title, last ask (the permission or question it is stuck on), how long it has been in that state, and the last message it wrote. `status --json` gives the same as JSON (also GET /api/status). Use it instead of calling `who` and `read` on each agent. Agents that wait on a permission for more than a few minutes are a problem to report to the operator, not to wait out.

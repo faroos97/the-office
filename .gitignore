@@ -21,3 +21,7 @@ Thumbs.db
 
 # Your own worker and task kinds (see README, "Tasks")
 /config.json
+
+# Access token for tailnet devices
+/office.token
+/*.log
