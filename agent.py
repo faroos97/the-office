@@ -12,6 +12,9 @@
                                               start a new agent (its own terminal) on a task;
                                               its model comes from the routing table in
                                               config.json unless you name one with --model
+    python agent.py resume <session-id|agent> [--model M] [--name N] [message]
+                                              open a new window on an earlier session; closes
+                                              nothing; name and model never left to default
     python agent.py task list                 the shared task list
     python agent.py task add <directory> <title> [details] [--kind K] [--after T-1,T-2]
                              [--check NAME] [--to <agent>]
@@ -435,6 +438,7 @@ def new(directory, task, model=None):
     if not r.get("ok"):
         print("error: %s" % r.get("error"))
         return 1
+    print("name: %s" % r.get("name"))
     print("model: %s (type: %s, why: %s)" % (
         r.get("model"), r.get("type"), r.get("why") or "-"))
     if r.get("area"):
@@ -449,6 +453,29 @@ def new(directory, task, model=None):
               "terminal is waiting on the operator (Claude Code asks once before it "
               "works in a folder it has never been started in): tell the operator "
               "which window, and do not start a second one.")
+    return 0
+
+
+def resume(args):
+    rest = list(args)
+    model, name = _flag(rest, "--model"), _flag(rest, "--name")
+    if not rest:
+        print("usage: resume <session-id|agent> [--model M] [--name N] [message]")
+        return 2
+    body = {"target": rest[0], "message": " ".join(rest[1:])}
+    if model:
+        body["model"] = model
+    if name:
+        body["name"] = name
+    r = _post("/api/resume", body)
+    if not r.get("ok"):
+        print("error: %s" % r.get("error"))
+        return 1
+    print("Resumed %s in %s." % (r["session_id"][:8], r["cwd"]))
+    print("name: %s" % r["name"])
+    print("model: %s (type: %s, why: %s)" % (r["model"], r["type"], r.get("why") or "-"))
+    if r.get("warning"):
+        print("WARNING: %s" % r["warning"])
     return 0
 
 
@@ -473,6 +500,8 @@ def main(argv):
             model = _flag(rest, "--model")
             if len(rest) >= 2:
                 return new(rest[0], " ".join(rest[1:]), model)
+        if cmd == "resume":
+            return resume(argv[2:])
         if cmd == "task":
             return task(argv[2:])
         if cmd == "manager":

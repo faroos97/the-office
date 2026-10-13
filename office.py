@@ -222,7 +222,7 @@ CREATE INDEX IF NOT EXISTS ix_tasks_status ON tasks(status);
 CREATE TABLE IF NOT EXISTS spawns (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   cwd TEXT, task TEXT, type TEXT, model TEXT, why TEXT,
-  ts TEXT DEFAULT (datetime('now')), session_id TEXT
+  ts TEXT DEFAULT (datetime('now')), session_id TEXT, name TEXT
 );
 
 -- Small key/value facts about the office itself (who the floor manager is).
@@ -247,6 +247,8 @@ def _db():
         conn.execute("ALTER TABLE agents ADD COLUMN pid INTEGER")
     if "state_since" not in have:
         conn.execute("ALTER TABLE agents ADD COLUMN state_since TEXT")
+    if "name" not in {r["name"] for r in conn.execute("PRAGMA table_info(spawns)")}:
+        conn.execute("ALTER TABLE spawns ADD COLUMN name TEXT")
     for col, typ in (("route_type", "TEXT"), ("route_model", "TEXT"),
                      ("verdict", "TEXT"), ("logged", "INTEGER DEFAULT 0")):
         if col not in have:
@@ -1405,7 +1407,7 @@ def _route_model(extra, area, task, rules=True, override=None):
     return models.route(_config().get("model_rules"), area, task, own)
 
 
-def _agent_flags(extra, area, task, rules=True, override=None):
+def _agent_flags(extra, area, task, rules=True, override=None, name=None):
     """The claude flags for a new agent: config's agent_args (or manager_args) with
     --model ALWAYS present and explicit (see _route_model), and the operator's own
     permission mode, so that a session nobody is watching does not stop at a permission
@@ -1418,12 +1420,129 @@ def _agent_flags(extra, area, task, rules=True, override=None):
         i = flags.index("--model")
         del flags[i:i + 2]
     flags += ["--model", model]
+    if name and "--name" not in flags and "-n" not in flags:
+        flags += ["--name", name]
     mode = _config().get("permission_mode")
     if mode and "--permission-mode" not in flags and not any(
             f.startswith("--dangerously") or f == "--allow-dangerously-skip-permissions"
             for f in flags):
         flags += ["--permission-mode", str(mode)]
     return flags
+
+
+def _live_names(conn, exclude=None):
+    """Names a person could be looking at right now: the titles on the board and the names
+    of agents just started that have not reported yet."""
+    taken = [r["task"] for r in conn.execute("SELECT task, session_id FROM agents")
+             if r["session_id"] != exclude]
+    taken += [r["name"] for r in conn.execute(
+        "SELECT name FROM spawns WHERE name IS NOT NULL AND (session_id IN"
+        " (SELECT session_id FROM agents WHERE session_id != ?) OR (session_id IS NULL"
+        " AND (julianday('now')-julianday(ts))*86400 < 900))", (exclude or "",))]
+    return taken
+
+
+def _launch(args, cwd, name):
+    """Open a terminal window titled `name` running `args`. On Windows the title is the
+    one `start` gives the window, and claude is told not to overwrite it with its own, so
+    the window, the taskbar and claude's /resume picker all show the same words."""
+    env = {k: v for k, v in os.environ.items() if k not in _SESSION_ENV}
+    env["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"] = "1"
+    if sys.platform.startswith("win"):
+        subprocess.Popen(["cmd", "/c", "start", name or "Office agent", "cmd", "/k"] + args,
+                         cwd=cwd, env=env)
+    elif sys.platform == "darwin":
+        line = "cd %s && %s" % (shlex.quote(cwd), " ".join(shlex.quote(a) for a in args))
+        subprocess.Popen(["osascript", "-e",
+                          'tell application "Terminal" to do script "%s"'
+                          % line.replace("\\", "\\\\").replace('"', '\\"')], env=env)
+    else:
+        term = os.environ.get("OFFICE_TERMINAL", "x-terminal-emulator")
+        subprocess.Popen([term, "-e"] + args, cwd=cwd, env=env)
+
+
+def _transcript_cwd(session_id):
+    """(folder, transcript path) of a Claude Code session that is no longer on the board,
+    found by id under ~/.claude/projects. (None, None) when there is no such transcript."""
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", session_id or ""):
+        return None, None
+    root = os.path.join(os.path.expanduser("~"), ".claude", "projects")
+    try:
+        for d in os.listdir(root):
+            path = os.path.join(root, d, session_id + ".jsonl")
+            if os.path.isfile(path):
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    for _ in range(80):
+                        ln = f.readline()
+                        if not ln:
+                            break
+                        try:
+                            cwd = json.loads(ln).get("cwd")
+                        except ValueError:
+                            continue
+                        if cwd:
+                            return cwd, path
+                return None, path
+    except OSError:
+        pass
+    return None, None
+
+
+def resume_agent(payload):
+    """Open a new window that resumes an earlier session, named and on a model chosen here
+    (never the account default). `target` is a session id (a full id also works for an
+    agent that has closed), an agent's folder name, or a part of its title. Closes nothing:
+    if the old window is still open the answer says so."""
+    if os.environ.get("OFFICE_ALLOW_SPAWN") != "1":
+        return {"ok": False, "error": "creating agents is off. Start office.py with "
+                "OFFICE_ALLOW_SPAWN=1 to turn it on."}
+    cfg = _config()
+    if cfg.get("_error"):
+        return {"ok": False, "error": cfg["_error"]}
+    target = (payload.get("target") or "").strip()
+    if not target:
+        return {"ok": False, "error": "usage: resume <session-id|agent name> [--model M] "
+                "[--name N] [message]"}
+    override = (payload.get("model") or "").strip() or None
+    if override and not models.valid_model(override):
+        return {"ok": False, "error": "not a model name: %r" % override}
+    conn = _db()
+    try:
+        row = _resolve(conn, target)
+        sid, cwd, title, still_open = None, None, None, False
+        if row:
+            sid, cwd, title = row["session_id"], row.get("cwd"), row.get("task")
+            still_open = bool(row.get("pid")) and _pid_alive(row["pid"])
+        else:
+            cwd, _ = _transcript_cwd(target)
+            sid = target if cwd else None
+        if not sid or not cwd or not os.path.isdir(cwd):
+            return {"ok": False, "error": "no agent on the board and no transcript matches %r"
+                    % target}
+        if sid.startswith("task-"):
+            return {"ok": False, "error": "that is a task runner desk, not a session"}
+        spawn = conn.execute("SELECT * FROM spawns WHERE session_id=?", (sid,)).fetchone()
+        original = (spawn["task"] if spawn else None) or title or ""
+        name = models.short_name(payload.get("name") or title or original,
+                                 fallback=os.path.basename(cwd.rstrip("\\/")) or "Agent")
+        name = models.unique_name(name, _live_names(conn, exclude=sid))
+        extra = cfg.get("agent_args") or []
+        model, mtype, why = _route_model(extra, cwd, original, True, override)
+    finally:
+        conn.close()
+    message = " ".join((payload.get("message") or "").split()).replace('"', "'")[:2000]
+    flags = _agent_flags(extra, cwd, original, True, model, name)
+    args = [_claude_bin(), "--resume", sid] + flags + ([message] if message else [])
+    try:
+        _launch(args, cwd, name)
+    except OSError as e:
+        return {"ok": False, "error": "could not open a terminal: %s" % e}
+    out = {"ok": True, "session_id": sid, "cwd": cwd, "name": name, "model": model,
+           "type": mtype, "why": why}
+    if still_open:
+        out["warning"] = ("the old window of this session is still open (pid %s): two "
+                          "windows on one session fight over it. Close the old one." % row["pid"])
+    return out
 
 
 def spawn_agent(payload):
@@ -1445,6 +1564,7 @@ def spawn_agent(payload):
     if cfg.get("_error"):
         return {"ok": False, "error": cfg["_error"]}
     extra = cfg.get("agent_args") or []
+    asked = payload.get("task") or ""
     if payload.get("role") == "manager":
         # the floor manager: its rulebook is manager.md, its goal comes from the operator
         conn = _db()
@@ -1484,35 +1604,24 @@ def spawn_agent(payload):
         return {"ok": False, "error": "not a model name: %r" % override}
     is_agent = payload.get("role") != "manager"
     model, mtype, why = _route_model(extra, area or cwd, task, is_agent, override)
-    args = [_claude_bin()] + _agent_flags(extra, area or cwd, task, is_agent, model) + (
-        [task] if task else [])
-    # If office.py itself was started from inside a Claude Code session, its per-session
-    # variables must not leak into the new agent (it would think it is a child session).
-    env = {k: v for k, v in os.environ.items() if k not in _SESSION_ENV}
-    try:
-        if sys.platform.startswith("win"):
-            subprocess.Popen(["cmd", "/c", "start", "Office agent", "cmd", "/k"] + args,
-                             cwd=cwd, env=env)
-        elif sys.platform == "darwin":
-            line = "cd %s && %s" % (shlex.quote(cwd),
-                                    " ".join(shlex.quote(a) for a in args))
-            subprocess.Popen(["osascript", "-e",
-                              'tell application "Terminal" to do script "%s"'
-                              % line.replace("\\", "\\\\").replace('"', '\\"')], env=env)
-        else:
-            term = os.environ.get("OFFICE_TERMINAL", "x-terminal-emulator")
-            subprocess.Popen([term, "-e"] + args, cwd=cwd, env=env)
-    except OSError as e:
-        return {"ok": False, "error": "could not open a terminal: %s" % e}
     conn = _db()
     try:
+        base = models.short_name(payload.get("name") or (asked if is_agent else "Floor manager"),
+                                 fallback=os.path.basename(cwd.rstrip("\\/")) or "Agent")
+        name = models.unique_name(base, _live_names(conn))
         with conn:
-            conn.execute("INSERT INTO spawns (cwd, task, type, model, why) VALUES (?,?,?,?,?)",
-                         (cwd, task[:300], mtype, model, why))
+            conn.execute("INSERT INTO spawns (cwd, task, type, model, why, name)"
+                         " VALUES (?,?,?,?,?,?)", (cwd, task[:300], mtype, model, why, name))
     finally:
         conn.close()
+    args = [_claude_bin()] + _agent_flags(extra, area or cwd, task, is_agent, model, name) + (
+        [task] if task else [])
+    try:
+        _launch(args, cwd, name)
+    except OSError as e:
+        return {"ok": False, "error": "could not open a terminal: %s" % e}
     return {"ok": True, "cwd": cwd, "area": area, "task": task, "warning": warning,
-            "model": model, "type": mtype, "why": why}
+            "model": model, "type": mtype, "why": why, "name": name}
 
 
 # ---------------------------------------------------------------- http server
@@ -1683,6 +1792,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/agents/report": report,
             "/api/messages": send_message,
             "/api/spawn": spawn_agent,
+            "/api/resume": resume_agent,
             "/api/team": team,
             "/api/manager": manager,
             "/api/models/mark": models_mark,

@@ -56,6 +56,33 @@ def model_from_args(args):
     return None
 
 
+# ---------------------------------------------------------------- names
+_NAME_BAD = re.compile(r"[^\w .,'+-]", re.UNICODE)
+_FIRST_CLAUSE = re.compile(r"[.:;(\[\u2014\n]")
+
+
+def short_name(text, words=6, fallback="Agent"):
+    """A window / session name from a task: its first clause, at most `words` words, with
+    nothing that cmd.exe or a shell would treat as syntax. 'Fix and deploy The Office
+    (repo C:/...)' becomes 'Fix and deploy The Office'."""
+    text = " ".join(str(text or "").split())
+    clause = _FIRST_CLAUSE.split(text, 1)[0]
+    clause = _NAME_BAD.sub(" ", clause)
+    out = clause.split()[:words]
+    return " ".join(out).strip(" .,'-") or fallback
+
+
+def unique_name(name, taken):
+    """`name`, or name-2, name-3 ... when a live agent already has it (case-insensitive)."""
+    taken = {str(t).strip().lower() for t in taken if t}
+    if name.lower() not in taken:
+        return name
+    n = 2
+    while ("%s-%d" % (name, n)).lower() in taken:
+        n += 1
+    return "%s-%d" % (name, n)
+
+
 # ---------------------------------------------------------------- the log
 def log_path():
     return os.environ.get("OFFICE_MODEL_LOG") or os.path.join(

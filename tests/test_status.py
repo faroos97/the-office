@@ -156,6 +156,10 @@ class SpawnCommand(unittest.TestCase):
     def tearDown(self):
         office.subprocess.Popen = self.popen
 
+    def flag(self, name):
+        a = self.argv()
+        return a[a.index(name) + 1]
+
     def argv(self):
         args = self.calls[-1][0]
         return args[args.index("cmd", 1) + 2:] if sys.platform.startswith("win") else args
@@ -164,18 +168,19 @@ class SpawnCommand(unittest.TestCase):
         r = office.spawn_agent({"cwd": os.path.join(self.folder, "mockups"), "task": "a site"})
         self.assertTrue(r["ok"], r)
         argv = self.argv()
-        self.assertEqual(argv[1:5], ["--model", "claude-fable-5-1", "--permission-mode", "auto"])
-        self.assertTrue(argv[5].startswith("Your area is the folder"))
+        self.assertEqual(self.flag("--model"), "claude-fable-5-1")
+        self.assertEqual(self.flag("--permission-mode"), "auto")
+        self.assertTrue(argv[-1].startswith("Your area is the folder"))
         self.assertEqual(os.path.normcase(self.calls[-1][1]["cwd"]), os.path.normcase(self.folder))
 
     def test_other_agent_keeps_sonnet_with_auto_mode(self):
         office.spawn_agent({"cwd": os.path.join(self.folder, "clients"), "task": "fix cart"})
-        self.assertEqual(self.argv()[1:5], ["--model", "sonnet", "--permission-mode", "auto"])
+        self.assertEqual((self.flag("--model"), self.flag("--permission-mode")), ("sonnet", "auto"))
 
     def test_manager_keeps_its_own_model(self):
         office.spawn_agent({"cwd": os.path.join(self.folder, "mockups"), "task": "demo",
                             "role": "manager"})
-        self.assertEqual(self.argv()[1:5], ["--model", "opus", "--permission-mode", "auto"])
+        self.assertEqual((self.flag("--model"), self.flag("--permission-mode")), ("opus", "auto"))
 
     def test_no_session_env_leaks(self):
         os.environ["CLAUDE_CODE_SESSION_ID"] = "parent"

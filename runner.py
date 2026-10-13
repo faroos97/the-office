@@ -171,6 +171,10 @@ def run_claude(task, desk):
         prompt += "\n\n" + task["body"]
     args = [_claude_bin(), "-p", "--output-format", "json"]
     args += shlex.split(os.environ.get("OFFICE_WORKER_ARGS", ""), posix=os.name != "nt")
+    if "--name" not in args:
+        # the name claude's /resume list shows for this headless run
+        args += ["--name", models.short_name("%s %s" % (task.get("ref") or "task",
+                                                         task.get("title")), fallback="task")]
     if "--model" not in args:
         # never inherit the operator's own (most expensive) default model
         try:
