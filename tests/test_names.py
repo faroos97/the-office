@@ -47,8 +47,9 @@ def write_config(**cfg):
 class Launch(unittest.TestCase):
     def setUp(self):
         self.calls = []
-        self.popen = office.subprocess.Popen
-        office.subprocess.Popen = lambda args, **kw: self.calls.append((args, kw))
+        self.launch = office._launch
+        office._launch = lambda args, cwd, name, task=None: self.calls.append(
+            (list(args) + ([task] if task else []), {"cwd": cwd, "name": name}))
         os.environ["OFFICE_ALLOW_SPAWN"] = "1"
         write_config(permission_mode="auto", agent_args=["--model", "sonnet"], model_rules=TABLE)
         conn = office._db()
@@ -63,7 +64,7 @@ class Launch(unittest.TestCase):
                                                        % os.path.basename(ROOT)}]}]}}, f)
 
     def tearDown(self):
-        office.subprocess.Popen = self.popen
+        office._launch = self.launch
 
     def last(self):
         args, kw = self.calls[-1]
@@ -77,10 +78,8 @@ class Launch(unittest.TestCase):
         r = office.spawn_agent({"cwd": self.folder, "task": "Fix the checkout button. Details..."})
         self.assertEqual(r["name"], "Fix the checkout button")
         args, kw = self.last()
-        if sys.platform.startswith("win"):
-            self.assertEqual(args[:4], ["cmd", "/c", "start", "Fix the checkout button"])
+        self.assertEqual(kw["name"], "Fix the checkout button")
         self.assertEqual(self.flag(args, "--name"), "Fix the checkout button")
-        self.assertEqual(kw["env"]["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"], "1")
 
     def test_second_agent_with_the_same_title_gets_a_number(self):
         a = office.spawn_agent({"cwd": self.folder, "task": "Fix the checkout button"})
@@ -98,6 +97,39 @@ class Launch(unittest.TestCase):
                        "cwd": self.folder, "task": "Fix the checkout button"})
         r = office.spawn_agent({"cwd": self.folder, "task": "Fix the checkout button"})
         self.assertEqual(r["name"], "Fix the checkout button-2")
+
+
+class WindowsCommand(unittest.TestCase):
+    ARGS = ["C:\\Users\\x\\claude.EXE", "--model", "claude-opus-5-5", "--name", "Fix cart",
+            "--permission-mode", "auto"]
+
+    def test_title_is_set_inside_the_window_and_the_task_stays_out_of_the_line(self):
+        cmd = office._win_command(self.ARGS, "Fix cart", 'do a & b | c ^ d ! "q" %PATH%')
+        self.assertTrue(cmd.startswith('cmd /c start "Fix cart" cmd /v:on /s /k "title Fix cart & '))
+        self.assertTrue(cmd.endswith('"!OFFICE_TASK!""'))
+        for bad in "|^%":
+            self.assertNotIn(bad, cmd)
+        self.assertEqual(cmd.count("&"), 1)           # only the one after `title`
+        self.assertIn('--name "Fix cart"', cmd)
+        self.assertIn("--model claude-opus-5-5", cmd)
+
+    def test_no_task_no_placeholder(self):
+        self.assertNotIn("OFFICE_TASK", office._win_command(self.ARGS, "Fix cart", ""))
+
+    def test_launch_passes_the_task_in_the_environment_and_stops_claude_retitling(self):
+        seen = {}
+        os.environ["CLAUDE_CODE_SESSION_ID"] = "parent"
+        saved = office.subprocess.Popen
+        office.subprocess.Popen = lambda args, **kw: seen.update(args=args, **kw)
+        real = office._launch
+        try:
+            real(self.ARGS, os.getcwd(), "Fix cart", 'a & "b"')
+        finally:
+            office.subprocess.Popen = saved
+        if sys.platform.startswith("win"):
+            self.assertEqual(seen["env"]["OFFICE_TASK"], "a & 'b'")
+        self.assertNotIn("CLAUDE_CODE_SESSION_ID", seen["env"])
+        self.assertEqual(seen["env"]["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"], "1")
 
 
 class Resume(unittest.TestCase):
@@ -119,8 +151,7 @@ class Resume(unittest.TestCase):
         self.assertEqual(Launch.flag(args, "--model"), "claude-opus-5-5")   # strategy row
         self.assertEqual(Launch.flag(args, "--permission-mode"), "auto")
         self.assertEqual(args[-1], "carry on")
-        if sys.platform.startswith("win"):
-            self.assertEqual(args[3], "Plan the Lunoor roadmap")
+        self.assertEqual(Launch.last(self)[1]["name"], "Plan the Lunoor roadmap")
 
     def test_resume_uses_the_original_task_of_a_spawned_agent(self):
         r = office.spawn_agent({"cwd": self.folder, "task": "Build the Nordvia demo hero"})

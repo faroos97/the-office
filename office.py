@@ -1442,23 +1442,46 @@ def _live_names(conn, exclude=None):
     return taken
 
 
-def _launch(args, cwd, name):
-    """Open a terminal window titled `name` running `args`. On Windows the title is the
-    one `start` gives the window, and claude is told not to overwrite it with its own, so
-    the window, the taskbar and claude's /resume picker all show the same words."""
+_SAFE_ARG = re.compile(r"^[\w.\-\[\]:/\\]+$")
+
+
+def _win_command(args, name, task):
+    """The command line that opens a window titled `name` running `args` (then `task` as
+    the last argument). The window runs `title NAME` itself: with only `start "NAME"` the
+    terminal shows "NAME - <the whole command line>". The task is handed over in the
+    environment variable OFFICE_TASK and expanded late (cmd /v:on, !OFFICE_TASK!), so
+    that an & | ^ or ! in a task is never read as shell syntax. Everything else on the
+    line is a flag value this module built: model, session id, name (no shell characters),
+    permission mode."""
+    parts = ['"%s"' % args[0]]
+    for a in args[1:]:
+        a = str(a).replace('"', "'")
+        parts.append(a if _SAFE_ARG.match(a) else '"%s"' % a)
+    if task:
+        parts.append('"!OFFICE_TASK!"')
+    inner = "title %s & %s" % (name, " ".join(parts))
+    return 'cmd /c start "%s" cmd /v:on /s /k "%s"' % (name, inner)
+
+
+def _launch(args, cwd, name, task=None):
+    """Open a terminal window titled `name` running claude `args` (and `task`, if any, as
+    its prompt). claude is told not to overwrite the title with its own, so the window,
+    the taskbar and claude's /resume picker all show the same words."""
     env = {k: v for k, v in os.environ.items() if k not in _SESSION_ENV}
     env["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"] = "1"
+    task = " ".join(str(task or "").split()).replace('"', "'")
     if sys.platform.startswith("win"):
-        subprocess.Popen(["cmd", "/c", "start", name or "Office agent", "cmd", "/k"] + args,
-                         cwd=cwd, env=env)
+        env["OFFICE_TASK"] = task
+        subprocess.Popen(_win_command(args, name, task), cwd=cwd, env=env)
     elif sys.platform == "darwin":
-        line = "cd %s && %s" % (shlex.quote(cwd), " ".join(shlex.quote(a) for a in args))
+        line = "cd %s && %s" % (shlex.quote(cwd),
+                                " ".join(shlex.quote(a) for a in args + ([task] if task else [])))
         subprocess.Popen(["osascript", "-e",
                           'tell application "Terminal" to do script "%s"'
                           % line.replace("\\", "\\\\").replace('"', '\\"')], env=env)
     else:
         term = os.environ.get("OFFICE_TERMINAL", "x-terminal-emulator")
-        subprocess.Popen([term, "-e"] + args, cwd=cwd, env=env)
+        subprocess.Popen([term, "-e"] + args + ([task] if task else []), cwd=cwd, env=env)
 
 
 def _transcript_cwd(session_id):
@@ -1532,9 +1555,9 @@ def resume_agent(payload):
         conn.close()
     message = " ".join((payload.get("message") or "").split()).replace('"', "'")[:2000]
     flags = _agent_flags(extra, cwd, original, True, model, name)
-    args = [_claude_bin(), "--resume", sid] + flags + ([message] if message else [])
+    args = [_claude_bin(), "--resume", sid] + flags
     try:
-        _launch(args, cwd, name)
+        _launch(args, cwd, name, message)
     except OSError as e:
         return {"ok": False, "error": "could not open a terminal: %s" % e}
     out = {"ok": True, "session_id": sid, "cwd": cwd, "name": name, "model": model,
@@ -1614,10 +1637,9 @@ def spawn_agent(payload):
                          " VALUES (?,?,?,?,?,?)", (cwd, task[:300], mtype, model, why, name))
     finally:
         conn.close()
-    args = [_claude_bin()] + _agent_flags(extra, area or cwd, task, is_agent, model, name) + (
-        [task] if task else [])
+    args = [_claude_bin()] + _agent_flags(extra, area or cwd, task, is_agent, model, name)
     try:
-        _launch(args, cwd, name)
+        _launch(args, cwd, name, task)
     except OSError as e:
         return {"ok": False, "error": "could not open a terminal: %s" % e}
     return {"ok": True, "cwd": cwd, "area": area, "task": task, "warning": warning,

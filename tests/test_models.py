@@ -115,8 +115,9 @@ class Flags(unittest.TestCase):
 class Spawn(unittest.TestCase):
     def setUp(self):
         self.calls = []
-        self.popen = office.subprocess.Popen
-        office.subprocess.Popen = lambda args, **kw: self.calls.append((args, kw))
+        self.launch = office._launch
+        office._launch = lambda args, cwd, name, task=None: self.calls.append(
+            (list(args) + ([task] if task else []), {"cwd": cwd, "name": name}))
         os.environ["OFFICE_ALLOW_SPAWN"] = "1"
         self.folder = os.path.join(_TMP, "PORTFOLIO")
         os.makedirs(os.path.join(self.folder, ".claude"), exist_ok=True)
@@ -126,7 +127,7 @@ class Spawn(unittest.TestCase):
         write_config(permission_mode="auto", agent_args=["--model", "sonnet"], model_rules=TABLE)
 
     def tearDown(self):
-        office.subprocess.Popen = self.popen
+        office._launch = self.launch
 
     def model_arg(self):
         args = self.calls[-1][0]

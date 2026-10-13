@@ -139,8 +139,9 @@ class SpawnCommand(unittest.TestCase):
 
     def setUp(self):
         self.calls = []
-        self.popen = office.subprocess.Popen
-        office.subprocess.Popen = lambda args, **kw: self.calls.append((args, kw))
+        self.launch = office._launch
+        office._launch = lambda args, cwd, name, task=None: self.calls.append(
+            (list(args) + ([task] if task else []), {"cwd": cwd, "name": name}))
         os.environ["OFFICE_ALLOW_SPAWN"] = "1"
         self.folder = os.path.join(_TMP, "PORTFOLIO")
         for sub in ("mockups", "clients"):
@@ -154,15 +155,14 @@ class SpawnCommand(unittest.TestCase):
                      model_rules=[{"match": r"mockups|demos?", "model": "claude-fable-5-1"}])
 
     def tearDown(self):
-        office.subprocess.Popen = self.popen
+        office._launch = self.launch
 
     def flag(self, name):
         a = self.argv()
         return a[a.index(name) + 1]
 
     def argv(self):
-        args = self.calls[-1][0]
-        return args[args.index("cmd", 1) + 2:] if sys.platform.startswith("win") else args
+        return self.calls[-1][0]
 
     def test_demo_agent_gets_fable_and_auto_mode(self):
         r = office.spawn_agent({"cwd": os.path.join(self.folder, "mockups"), "task": "a site"})
@@ -181,11 +181,6 @@ class SpawnCommand(unittest.TestCase):
         office.spawn_agent({"cwd": os.path.join(self.folder, "mockups"), "task": "demo",
                             "role": "manager"})
         self.assertEqual((self.flag("--model"), self.flag("--permission-mode")), ("opus", "auto"))
-
-    def test_no_session_env_leaks(self):
-        os.environ["CLAUDE_CODE_SESSION_ID"] = "parent"
-        office.spawn_agent({"cwd": self.folder, "task": "x"})
-        self.assertNotIn("CLAUDE_CODE_SESSION_ID", self.calls[-1][1]["env"])
 
 
 class Remote(unittest.TestCase):
