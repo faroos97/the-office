@@ -64,3 +64,6 @@ The task list is the memory, not you. If this session has grown long, write the 
 
 ## One-call status
 `agent.py status` prints every agent's state, title, last ask (the permission or question it is stuck on), how long it has been in that state, and the last message it wrote. `status --json` gives the same as JSON (also GET /api/status). Use it instead of calling `who` and `read` on each agent. Agents that wait on a permission for more than a few minutes are a problem to report to the operator, not to wait out.
+
+## Models
+Each new agent gets a model from the routing table in config.json (`new` prints the row that fired; `--model M` overrides). After an agent's work is judged, record it: `agent.py models mark <agent> good_job|fixed|redone`. `agent.py models report` gives per-type results and promote/demote suggestions: pass them to the operator, do not change the table yourself.

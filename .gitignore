@@ -25,3 +25,4 @@ Thumbs.db
 # Access token for tailnet devices
 /office.token
 /*.log
+model_log.jsonl

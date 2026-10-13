@@ -304,3 +304,7 @@ MIT, see [LICENSE](LICENSE).
 - A session whose process is gone is dropped from the board at once (the hook reports the Claude pid).
 - "Claude is waiting for your input" is the idle notice, shown as *waiting*, not *blocked*. Only a permission or question is *blocked*.
 - From your phone: the server stays on 127.0.0.1; `tailscale serve --bg --https=443 http://127.0.0.1:8741` publishes it on your tailnet only (never Funnel). Set `remote_host` in config.json, then open `https://<host>/?token=<contents of office.token>` once per device. Without the token, or via Funnel, requests get 403. `scripts/install_office_task.ps1` registers the logon task.
+
+## Model routing
+
+`config.json` `model_rules` is an ordered table of `{type, match, model, why}`; the first row whose regex matches the task text and folder decides the model, and the last row (`.*`) is the default. `agent.py new` prints `model: X (type: T, why: ...)` and accepts `--model M`; every agent and the built-in task worker is started with an explicit `--model`, never the operator's own default. The table lives in `scripts/set_model_table.py` (run it to write config.json). Results are logged one line per agent to `model_log.jsonl` (when it closes, or when a prompt trigger with `"verdict": "good_job"` fires), corrected with `agent.py models mark`, and summarised by `agent.py models report` (suggestions only).

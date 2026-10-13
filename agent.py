@@ -18,6 +18,10 @@
     python agent.py task run                  start the runner that works through the list
     python agent.py task done|blocked <id> <note>   close a task assigned to you
     python agent.py task retry <id> [better instruction] | task cancel <id>
+    python agent.py models report             how each kind of task did on each model (from
+                                              model_log.jsonl); suggestions only
+    python agent.py models mark <agent> good_job|fixed|redone
+                                              say how an agent's work turned out
     python agent.py manager start|stop|status the floor manager registers itself
                                               (start prints its rulebook, manager.md)
     python agent.py wait [--timeout 100]      sleep until something changes, then say what
@@ -312,6 +316,35 @@ def manager(args):
     return 0
 
 
+def models_cmd(args):
+    sub = args[0] if args else "report"
+    if sub == "mark" and len(args) >= 3:
+        r = _post("/api/models/mark", {"target": " ".join(args[1:-1]), "verdict": args[-1]})
+        print(("%s: %s" % (r.get("agent"), r.get("verdict"))) if r.get("ok")
+              else "error: %s" % r.get("error"))
+        return 0 if r.get("ok") else 1
+    if sub != "report":
+        print("usage: models report | models mark <agent> good_job|fixed|redone")
+        return 2
+    data = _get("/api/models")
+    if not data["rows"]:
+        print("The model log is empty: agents are logged when they close, or when the "
+              "operator says good job.")
+        return 0
+    print("%d logged agent(s). good job = share of RATED runs; tokens = input + output + "
+          "cache writes." % data["entries"])
+    for r in data["rows"]:
+        print("\n%s  on %s" % (r["type"], r["model"]))
+        print("    runs %d (rated %d), good job %s, avg tokens %s" % (
+            r["runs"], r["rated"],
+            ("%d%%" % r["good_job_pct"]) if r["good_job_pct"] is not None else "n/a",
+            "{:,}".format(r["avg_tokens"]) if r["avg_tokens"] is not None else "n/a"))
+        if r["suggestion"]:
+            print("    suggestion: %s" % r["suggestion"])
+    print("\nSuggestions only: nothing changes until the operator edits the table.")
+    return 0
+
+
 def _snapshot():
     """What a manager watches: every task's status, every other agent's state."""
     tasks = {str(t["id"]): {"status": t["status"], "title": t["title"],
@@ -444,6 +477,8 @@ def main(argv):
             return task(argv[2:])
         if cmd == "manager":
             return manager(argv[2:])
+        if cmd == "models":
+            return models_cmd(argv[2:])
         if cmd == "wait":
             rest = list(argv[2:])
             t = _flag(rest, "--timeout")

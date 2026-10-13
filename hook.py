@@ -85,6 +85,28 @@ def prompt_triggers(prompt, config_path=None):
     return out
 
 
+def prompt_verdict(prompt, config_path=None):
+    """The verdict a prompt carries ("good_job"), from a "verdict" key on a prompt trigger
+    in config.json: the same words that make an agent commit also say its work was
+    accepted, which feeds the model log."""
+    if not prompt:
+        return None
+    path = config_path or os.environ.get("OFFICE_CONFIG") or os.path.join(HERE, "config.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            triggers = (json.load(f) or {}).get("prompt_triggers") or []
+    except (OSError, ValueError, AttributeError):
+        return None
+    for t in triggers:
+        try:
+            if isinstance(t, dict) and t.get("verdict") and re.search(
+                    t["match"], str(prompt), re.IGNORECASE | re.DOTALL):
+                return str(t["verdict"])
+        except (KeyError, re.error):
+            continue
+    return None
+
+
 def main():
     try:
         # bytes -> UTF-8 explicitly: on Windows sys.stdin defaults to the ANSI code page
@@ -111,6 +133,12 @@ def main():
         "tool_name": data.get("tool_name"),
         "transcript_path": data.get("transcript_path"),
     }
+    if data.get("model"):
+        payload["model"] = str(data["model"])[:80]
+    if event == "UserPromptSubmit":
+        verdict = prompt_verdict(data.get("prompt"))
+        if verdict:
+            payload["verdict"] = verdict
     pid = os.environ.get("CLAUDE_PID", "")
     if pid.isdigit():
         payload["pid"] = int(pid)   # lets the board drop this desk when the process is gone

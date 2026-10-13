@@ -217,6 +217,14 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS ix_tasks_status ON tasks(status);
 
+-- Agents started by spawn_agent, waiting to be matched with the session that appears
+-- in their folder (so the model log knows which model and type each session was given).
+CREATE TABLE IF NOT EXISTS spawns (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  cwd TEXT, task TEXT, type TEXT, model TEXT, why TEXT,
+  ts TEXT DEFAULT (datetime('now')), session_id TEXT
+);
+
 -- Small key/value facts about the office itself (who the floor manager is).
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
@@ -239,6 +247,10 @@ def _db():
         conn.execute("ALTER TABLE agents ADD COLUMN pid INTEGER")
     if "state_since" not in have:
         conn.execute("ALTER TABLE agents ADD COLUMN state_since TEXT")
+    for col, typ in (("route_type", "TEXT"), ("route_model", "TEXT"),
+                     ("verdict", "TEXT"), ("logged", "INTEGER DEFAULT 0")):
+        if col not in have:
+            conn.execute("ALTER TABLE agents ADD COLUMN %s %s" % (col, typ))
     if "check_name" not in {r["name"] for r in conn.execute("PRAGMA table_info(tasks)")}:
         conn.execute("ALTER TABLE tasks ADD COLUMN check_name TEXT")
     return conn
@@ -269,6 +281,47 @@ def _push_recent(existing, line):
     return json.dumps(items[:RECENT_CAP], ensure_ascii=False)
 
 
+VERDICTS = ("good_job", "fixed", "redone")
+
+
+def _log_agent(row, verdict=None):
+    """Write the one model-log line for this desk (see models.py): date, title, type,
+    model, verdict, tokens. Skips the task runner's own desks."""
+    if (row.get("session_id") or "").startswith("task-"):
+        return
+    try:
+        models.append_log({
+            "session": row.get("session_id"),
+            "title": row.get("task") or row.get("name") or "(untitled)",
+            "type": row.get("route_type") or "unrouted",
+            "model": row.get("route_model") or row.get("model") or "unknown",
+            "verdict": verdict or row.get("verdict") or "unrated",
+            "tokens": models.transcript_tokens(row.get("transcript_path"))})
+    except OSError:
+        pass
+
+
+def _finish(conn, row, why):
+    """A desk is done (session ended, process gone, or silent too long): log it once,
+    then remove it. Caller holds the transaction."""
+    if not row.get("logged"):
+        _log_agent(row)
+    conn.execute("DELETE FROM agents WHERE session_id=?", (row["session_id"],))
+
+
+def _claim_spawn(conn, session_id, cwd):
+    """Match a brand-new session to the agent that spawn_agent started in its folder in
+    the last 15 minutes. Returns (type, model) or (None, None)."""
+    if not cwd:
+        return None, None
+    for r in conn.execute("SELECT * FROM spawns WHERE session_id IS NULL AND"
+                          " (julianday('now')-julianday(ts))*86400 < 900 ORDER BY id"):
+        if _norm_dir(r["cwd"]) == _norm_dir(cwd):
+            conn.execute("UPDATE spawns SET session_id=? WHERE id=?", (session_id, r["id"]))
+            return r["type"], r["model"]
+    return None, None
+
+
 def _is_idle_notice(payload):
     """A Notification that only says the session is idle at its prompt."""
     kind = (payload.get("notification_type") or "").strip().lower()
@@ -289,7 +342,10 @@ def report(payload):
     try:
         if event == "SessionEnd":
             with conn:
-                conn.execute("DELETE FROM agents WHERE session_id=?", (session_id,))
+                row = conn.execute("SELECT * FROM agents WHERE session_id=?",
+                                   (session_id,)).fetchone()
+                if row:
+                    _finish(conn, dict(row), "session ended")
             return {"ok": True, "removed": session_id}
 
         state, needs_you = _EVENT_MAP.get(event, ("working", False))
@@ -344,8 +400,22 @@ def report(payload):
         fields = {k: v for k, v in fields.items() if v is not None}
 
         with conn:
-            row = conn.execute("SELECT recent, state FROM agents WHERE session_id=?",
+            row = conn.execute("SELECT * FROM agents WHERE session_id=?",
                                (session_id,)).fetchone()
+            if row is None:
+                fields["route_type"], fields["route_model"] = _claim_spawn(
+                    conn, session_id, payload.get("cwd"))
+                fields = {k: v for k, v in fields.items() if v is not None}
+            if payload.get("verdict") in VERDICTS:
+                # the operator said good job (or the like): the work was accepted, so the
+                # model log line is written now, with the tokens spent so far
+                fields["verdict"] = payload["verdict"]
+                merged = dict(dict(row) if row else {"session_id": session_id}, **fields)
+                if row is None or not row["logged"]:
+                    _log_agent(merged, payload["verdict"])
+                    fields["logged"] = 1
+                else:
+                    models.set_verdict(session_id, payload["verdict"])
             if row is None or row["state"] != state:
                 fields["state_since"] = datetime.datetime.now(datetime.timezone.utc).strftime(
                     "%Y-%m-%d %H:%M:%S")
@@ -425,14 +495,13 @@ def board():
         with conn:
             # silence alone does not remove a desk whose process is known and alive: an
             # idle agent at its prompt sends nothing for hours
-            conn.execute("DELETE FROM agents WHERE pid IS NULL AND"
-                         " (julianday('now')-julianday(updated_at))*86400 > ?",
-                         (GHOST_SECS,))
-            for r in conn.execute("SELECT session_id, pid FROM agents"
-                                  " WHERE pid IS NOT NULL").fetchall():
+            for r in conn.execute("SELECT * FROM agents WHERE pid IS NULL AND"
+                                  " (julianday('now')-julianday(updated_at))*86400 > ?",
+                                  (GHOST_SECS,)).fetchall():
+                _finish(conn, dict(r), "silent too long")
+            for r in conn.execute("SELECT * FROM agents WHERE pid IS NOT NULL").fetchall():
                 if not _pid_alive(r["pid"]):
-                    conn.execute("DELETE FROM agents WHERE session_id=?",
-                                 (r["session_id"],))
+                    _finish(conn, dict(r), "process gone")
         rows = conn.execute(
             "SELECT *, CAST((julianday('now')-julianday(updated_at))*86400 AS INTEGER)"
             " AS age_secs, CAST((julianday('now')-julianday(COALESCE(state_since,"
@@ -624,6 +693,40 @@ def conversation(target, limit=CONVO_MAX_MSGS):
             m["text"] = "…" + m["text"][-CONVO_MSG_CHARS:]
     head["messages"] = msgs[-int(limit):]
     return head
+
+
+def models_report(payload=None):
+    """The model log, grouped by type and model, with promote / demote suggestions."""
+    return models.report(models.read_log())
+
+
+def models_mark(payload):
+    """Say how an agent's work turned out: good_job, fixed or redone. `target` is a loose
+    agent reference (see _resolve) or, for an agent that has closed, the start of its
+    session id or a part of its title."""
+    verdict = (payload.get("verdict") or "").strip()
+    target = (payload.get("target") or "").strip()
+    if verdict not in VERDICTS or not target:
+        return {"ok": False, "error": "usage: models mark <agent> good_job|fixed|redone"}
+    conn = _db()
+    try:
+        row = _resolve(conn, target)
+        if row:
+            with conn:
+                conn.execute("UPDATE agents SET verdict=? WHERE session_id=?",
+                             (verdict, row["session_id"]))
+                if row.get("logged"):
+                    models.set_verdict(row["session_id"], verdict)
+                else:
+                    _log_agent(dict(row, verdict=verdict), verdict)
+                    conn.execute("UPDATE agents SET logged=1 WHERE session_id=?",
+                                 (row["session_id"],))
+            return {"ok": True, "agent": _label(row), "verdict": verdict}
+    finally:
+        conn.close()
+    if models.set_verdict(target, verdict):
+        return {"ok": True, "agent": target, "verdict": verdict}
+    return {"ok": False, "error": "no agent or logged run matches %r" % target}
 
 
 def status():
@@ -1401,6 +1504,13 @@ def spawn_agent(payload):
             subprocess.Popen([term, "-e"] + args, cwd=cwd, env=env)
     except OSError as e:
         return {"ok": False, "error": "could not open a terminal: %s" % e}
+    conn = _db()
+    try:
+        with conn:
+            conn.execute("INSERT INTO spawns (cwd, task, type, model, why) VALUES (?,?,?,?,?)",
+                         (cwd, task[:300], mtype, model, why))
+    finally:
+        conn.close()
     return {"ok": True, "cwd": cwd, "area": area, "task": task, "warning": warning,
             "model": model, "type": mtype, "why": why}
 
@@ -1546,6 +1656,8 @@ class Handler(BaseHTTPRequestHandler):
                                  " SameSite=Strict; Max-Age=31536000" % self._token())
             self.end_headers()
             return self.wfile.write(body)
+        if path == "/api/models":
+            return self._send(200, models_report(), "application/json; charset=utf-8")
         if path == "/api/status":
             return self._send(200, status(), "application/json; charset=utf-8")
         if path == "/api/agents":
@@ -1573,6 +1685,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/spawn": spawn_agent,
             "/api/team": team,
             "/api/manager": manager,
+            "/api/models/mark": models_mark,
             "/api/tasks": task_add,
             "/api/tasks/claim": task_claim,
             "/api/tasks/update": task_update,
