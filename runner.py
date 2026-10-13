@@ -59,6 +59,8 @@ import threading
 import time
 import urllib.request
 
+import models
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 BASE = "http://127.0.0.1:%s" % (os.environ.get("OFFICE_PORT") or "8741")
 HEARTBEAT_SECS = 20
@@ -169,6 +171,13 @@ def run_claude(task, desk):
         prompt += "\n\n" + task["body"]
     args = [_claude_bin(), "-p", "--output-format", "json"]
     args += shlex.split(os.environ.get("OFFICE_WORKER_ARGS", ""), posix=os.name != "nt")
+    if "--model" not in args:
+        # never inherit the operator's own (most expensive) default model
+        try:
+            rows = _config().get("model_rules")
+        except ValueError:
+            rows = None
+        args += ["--model", models.route(rows, task.get("dir"), prompt)[0]]
     cwd = task.get("dir") if task.get("dir") and os.path.isdir(task["dir"]) else None
     desk.set("claude is working")
     try:

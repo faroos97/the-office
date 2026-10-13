@@ -8,7 +8,10 @@
     python agent.py tell <agent> <message>    leave a message for another agent
     python agent.py tell all <message>        leave the same message for every agent on the board
     python agent.py inbox [--wait SECONDS]    messages for you (optionally wait for one)
-    python agent.py new <directory> <task>    start a new agent (its own terminal) on a task
+    python agent.py new <directory> <task> [--model M]
+                                              start a new agent (its own terminal) on a task;
+                                              its model comes from the routing table in
+                                              config.json unless you name one with --model
     python agent.py task list                 the shared task list
     python agent.py task add <directory> <title> [details] [--kind K] [--after T-1,T-2]
                              [--check NAME] [--to <agent>]
@@ -391,11 +394,16 @@ def wait(timeout=100):
         time.sleep(4)
 
 
-def new(directory, task):
-    r = _post("/api/spawn", {"cwd": os.path.abspath(directory), "task": task})
+def new(directory, task, model=None):
+    body = {"cwd": os.path.abspath(directory), "task": task}
+    if model:
+        body["model"] = model
+    r = _post("/api/spawn", body)
     if not r.get("ok"):
         print("error: %s" % r.get("error"))
         return 1
+    print("model: %s (type: %s, why: %s)" % (
+        r.get("model"), r.get("type"), r.get("why") or "-"))
     if r.get("area"):
         print("New agent started in %s (the folder whose sessions report to The Office), "
               "with %s as its area." % (r.get("cwd"), r["area"]))
@@ -428,7 +436,10 @@ def main(argv):
         if cmd == "tell" and len(argv) >= 4:
             return tell(argv[2], " ".join(argv[3:]))
         if cmd == "new" and len(argv) >= 4:
-            return new(argv[2], " ".join(argv[3:]))
+            rest = list(argv[2:])
+            model = _flag(rest, "--model")
+            if len(rest) >= 2:
+                return new(rest[0], " ".join(rest[1:]), model)
         if cmd == "task":
             return task(argv[2:])
         if cmd == "manager":

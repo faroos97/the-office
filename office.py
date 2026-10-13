@@ -35,6 +35,8 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
+import models
+
 HOST = "127.0.0.1"           # localhost only, always
 DEFAULT_PORT = 8741
 DB_PATH = os.environ.get("OFFICE_DB") or os.path.join(
@@ -1287,24 +1289,32 @@ def _team_folder(cwd):
         folder = parent
 
 
-def _agent_flags(extra, area, task, rules=True):
-    """The claude flags for a new agent: config's agent_args (or manager_args), the
-    model that config's model_rules pick for this folder and task, and the operator's
-    own permission mode, so that a session nobody is watching does not stop at a
-    permission prompt. The mode is named in config ("permission_mode", normally "auto");
-    it only selects how the operator's existing permission rules are applied, and is
-    skipped when the args already name one."""
+def _route_model(extra, area, task, rules=True, override=None):
+    """(model, type, why) a new agent starts on. An explicit override wins; then, unless
+    `rules` is off (the manager), the first row of config.json "model_rules" that matches
+    the folder and task; else the model named in the config's own args, else the default
+    in models.py. Never empty: an agent is not left to inherit the operator's model."""
+    if override:
+        return override, "override", "chosen by the operator"
+    own = models.model_from_args(extra)
+    if not rules:
+        return (own or models.DEFAULT_MODEL), "manager", "set by manager_args"
+    return models.route(_config().get("model_rules"), area, task, own)
+
+
+def _agent_flags(extra, area, task, rules=True, override=None):
+    """The claude flags for a new agent: config's agent_args (or manager_args) with
+    --model ALWAYS present and explicit (see _route_model), and the operator's own
+    permission mode, so that a session nobody is watching does not stop at a permission
+    prompt. The mode is named in config ("permission_mode", normally "auto"); it only
+    selects how the operator's existing permission rules are applied, and is skipped
+    when the args already name one."""
     flags = [str(a) for a in extra]
-    for rule in (_config().get("model_rules") or []) if rules else []:
-        try:
-            if re.search(rule["match"], "%s %s" % (area or "", task or ""), re.I):
-                if "--model" in flags:
-                    i = flags.index("--model")
-                    del flags[i:i + 2]
-                flags += ["--model", str(rule["model"])]
-                break
-        except (KeyError, TypeError, re.error):
-            continue
+    model = _route_model(extra, area, task, rules, override)[0]
+    if "--model" in flags:
+        i = flags.index("--model")
+        del flags[i:i + 2]
+    flags += ["--model", model]
     mode = _config().get("permission_mode")
     if mode and "--permission-mode" not in flags and not any(
             f.startswith("--dangerously") or f == "--allow-dangerously-skip-permissions"
@@ -1366,8 +1376,12 @@ def spawn_agent(payload):
                        % (area.replace("\\", "/"), payload.get("task") or ""))
     # one line, no quotes: the task is passed as a single argument, never as shell text
     task = " ".join((payload.get("task") or "").split()).replace('"', "'")[:2000]
-    args = [_claude_bin()] + _agent_flags(extra, area or cwd, task,
-                                         payload.get("role") != "manager") + (
+    override = (payload.get("model") or "").strip() or None
+    if override and not models.valid_model(override):
+        return {"ok": False, "error": "not a model name: %r" % override}
+    is_agent = payload.get("role") != "manager"
+    model, mtype, why = _route_model(extra, area or cwd, task, is_agent, override)
+    args = [_claude_bin()] + _agent_flags(extra, area or cwd, task, is_agent, model) + (
         [task] if task else [])
     # If office.py itself was started from inside a Claude Code session, its per-session
     # variables must not leak into the new agent (it would think it is a child session).
@@ -1387,7 +1401,8 @@ def spawn_agent(payload):
             subprocess.Popen([term, "-e"] + args, cwd=cwd, env=env)
     except OSError as e:
         return {"ok": False, "error": "could not open a terminal: %s" % e}
-    return {"ok": True, "cwd": cwd, "area": area, "task": task, "warning": warning}
+    return {"ok": True, "cwd": cwd, "area": area, "task": task, "warning": warning,
+            "model": model, "type": mtype, "why": why}
 
 
 # ---------------------------------------------------------------- http server
