@@ -5,9 +5,14 @@ $ErrorActionPreference = 'Continue'
 $here = Split-Path -Parent $PSScriptRoot
 $py = 'C:\Users\faroo\AppData\Local\Python\bin\python.exe'
 $port = 8741
-$log = Join-Path $here 'office-server.log'
+# A fresh log per start (the last five are kept): a handle left open on one log file by a
+# crashed process once stopped the whole task from starting.
+$log = Join-Path $here ('office-server-{0}.log' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+Get-ChildItem -Path $here -Filter 'office-server*.log' -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending | Select-Object -Skip 4 |
+    ForEach-Object { try { Remove-Item $_.FullName -Force -ErrorAction Stop } catch {} }
 
-function Log($m) { "$(Get-Date -Format s) $m" | Add-Content -Path $log -Encoding utf8 }
+function Log($m) { try { "$(Get-Date -Format s) $m" | Add-Content -Path $log -Encoding utf8 -ErrorAction Stop } catch {} }
 
 # Tailnet-only HTTPS in front of the loopback server: scripts\serve_tailnet.ps1, as its own
 # hidden process, so that `tailscale serve` waiting on the operator never holds the server back.

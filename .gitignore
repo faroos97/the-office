@@ -26,3 +26,5 @@ Thumbs.db
 /office.token
 /*.log
 model_log.jsonl
+/office-server*.log
+/office-serve.log
