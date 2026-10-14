@@ -8,7 +8,7 @@
     python agent.py tell <agent> <message>    leave a message for another agent
     python agent.py tell all <message>        leave the same message for every agent on the board
     python agent.py inbox [--wait SECONDS]    messages for you (optionally wait for one)
-    python agent.py new <directory> <task> [--model M]
+    python agent.py new <directory> <task> [--model M] [--name N]
                                               start a new agent (its own terminal) on a task;
                                               its model comes from the routing table in
                                               config.json unless you name one with --model
@@ -430,10 +430,12 @@ def wait(timeout=100):
         time.sleep(4)
 
 
-def new(directory, task, model=None):
+def new(directory, task, model=None, name=None):
     body = {"cwd": os.path.abspath(directory), "task": task}
     if model:
         body["model"] = model
+    if name:
+        body["name"] = name
     r = _post("/api/spawn", body)
     if not r.get("ok"):
         print("error: %s" % r.get("error"))
@@ -497,9 +499,9 @@ def main(argv):
             return tell(argv[2], " ".join(argv[3:]))
         if cmd == "new" and len(argv) >= 4:
             rest = list(argv[2:])
-            model = _flag(rest, "--model")
+            model, name = _flag(rest, "--model"), _flag(rest, "--name")
             if len(rest) >= 2:
-                return new(rest[0], " ".join(rest[1:]), model)
+                return new(rest[0], " ".join(rest[1:]), model, name)
         if cmd == "resume":
             return resume(argv[2:])
         if cmd == "task":

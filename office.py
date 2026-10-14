@@ -1445,6 +1445,11 @@ def _live_names(conn, exclude=None):
 _SAFE_ARG = re.compile(r"^[\w.\-\[\]:/\\]+$")
 
 
+# cmd.exe caps an expanded command line at 8191 characters; the task rides in it, so
+# keep the task under that with room for the claude flags.
+PROMPT_MAX = 7000
+
+
 def _win_command(args, name, task):
     """The command line that opens a window titled `name` running `args` (then `task` as
     the last argument). The window runs `title NAME` itself: with only `start "NAME"` the
@@ -1553,7 +1558,7 @@ def resume_agent(payload):
         model, mtype, why = _route_model(extra, cwd, original, True, override)
     finally:
         conn.close()
-    message = " ".join((payload.get("message") or "").split()).replace('"', "'")[:2000]
+    message = " ".join((payload.get("message") or "").split()).replace('"', "'")[:PROMPT_MAX]
     flags = _agent_flags(extra, cwd, original, True, model, name)
     args = [_claude_bin(), "--resume", sid] + flags
     try:
@@ -1621,7 +1626,7 @@ def spawn_agent(payload):
                        "not in the one this session starts in. %s"
                        % (area.replace("\\", "/"), payload.get("task") or ""))
     # one line, no quotes: the task is passed as a single argument, never as shell text
-    task = " ".join((payload.get("task") or "").split()).replace('"', "'")[:2000]
+    task = " ".join((payload.get("task") or "").split()).replace('"', "'")[:PROMPT_MAX]
     override = (payload.get("model") or "").strip() or None
     if override and not models.valid_model(override):
         return {"ok": False, "error": "not a model name: %r" % override}
