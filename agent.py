@@ -430,10 +430,28 @@ def wait(timeout=100):
         time.sleep(4)
 
 
+def _model_id(model):
+    """Turn a short name ("opus-5.5", "opus 4.8", "sonnet-5.5") into the exact id the
+    CLI accepts, and refuse anything not in config.json, so an agent never starts
+    on a model name that `claude` rejects."""
+    if not model:
+        return model
+    with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"),
+              encoding="utf-8") as f:
+        known = {r["model"] for r in json.load(f).get("model_rules", []) if r.get("model")}
+    if model in known:
+        return model
+    key = model.lower().replace("claude-", "").replace(" ", "-").replace(".", "-")
+    hits = sorted(m for m in known if m.replace("claude-", "").startswith(key))
+    if len(hits) == 1:
+        return hits[0]
+    raise SystemExit("error: unknown model %r. Use one of: %s" % (model, ", ".join(sorted(known))))
+
+
 def new(directory, task, model=None, name=None):
     body = {"cwd": os.path.abspath(directory), "task": task}
     if model:
-        body["model"] = model
+        body["model"] = _model_id(model)
     if name:
         body["name"] = name
     r = _post("/api/spawn", body)
@@ -466,7 +484,7 @@ def resume(args):
         return 2
     body = {"target": rest[0], "message": " ".join(rest[1:])}
     if model:
-        body["model"] = model
+        body["model"] = _model_id(model)
     if name:
         body["name"] = name
     r = _post("/api/resume", body)
