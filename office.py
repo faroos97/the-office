@@ -1422,6 +1422,11 @@ def _agent_flags(extra, area, task, rules=True, override=None, name=None):
     flags += ["--model", model]
     if name and "--name" not in flags and "-n" not in flags:
         flags += ["--name", name]
+    # Every agent runs at the configured effort (Yass 2026-11-13: medium, to save the
+    # weekly quota), whatever the user-level effortLevel says.
+    effort = _config().get("agent_effort")
+    if effort and "--effort" not in flags:
+        flags += ["--effort", str(effort)]
     mode = _config().get("permission_mode")
     if mode and "--permission-mode" not in flags and not any(
             f.startswith("--dangerously") or f == "--allow-dangerously-skip-permissions"

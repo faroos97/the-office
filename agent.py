@@ -438,7 +438,12 @@ def _model_id(model):
         return model
     with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"),
               encoding="utf-8") as f:
-        known = {r["model"] for r in json.load(f).get("model_rules", []) if r.get("model")}
+        cfg = json.load(f)
+    # Models the router can pick, plus models only started by hand (extra_models),
+    # e.g. claude-opus-5 for team leads. Without the second list "claude-opus-5"
+    # was prefix-matched to claude-opus-5-5.
+    known = {r["model"] for r in cfg.get("model_rules", []) if r.get("model")}
+    known |= set(cfg.get("extra_models", []))
     if model in known:
         return model
     key = model.lower().replace("claude-", "").replace(" ", "-").replace(".", "-")
