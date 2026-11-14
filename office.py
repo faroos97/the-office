@@ -1422,8 +1422,8 @@ def _agent_flags(extra, area, task, rules=True, override=None, name=None):
     flags += ["--model", model]
     if name and "--name" not in flags and "-n" not in flags:
         flags += ["--name", name]
-    # Every agent runs at the configured effort (Yass 2026-11-13: medium, to save the
-    # weekly quota), whatever the user-level effortLevel says.
+    # Optional: force an effort for every agent. Unset by default (Yass 2026-11-14:
+    # agents use Claude's own default effort, never a forced level).
     effort = _config().get("agent_effort")
     if effort and "--effort" not in flags:
         flags += ["--effort", str(effort)]
