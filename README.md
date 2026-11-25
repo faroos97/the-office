@@ -22,18 +22,28 @@ The Office fixes both.
 
 ### 1. A board that tells you where to look
 
-Each session is a desk. The title is the one Claude Code already gives the session, so it says what the session is about, not which folder it sits in. Desks are sorted by how much they need you.
+The board (in French) is a family tree: the owners, the manager, the departments, and under each department the sessions open right now. The title is the one the session already has, so it says what the session is about, not which folder it sits in. Sessions that need you are numbered: permissions first, then the longest wait.
 
-| | State | Meaning |
-|---|---|---|
-| 🔴 | blocked | waiting on a decision or a permission. Pulses, with a soft chime. |
-| 🟡 | waiting | finished its turn and wants your reply |
-| 🟢 | working | shows the tool it is using right now |
-| ⚪ | idle | went quiet |
+| State | Meaning |
+|---|---|
+| permission | stopped on a permission prompt |
+| decision | asked you something: an `AskUserQuestion` nobody answered, or a question in its last text |
+| travaille | in the middle of a turn |
+| au repos | nothing to do for you |
+
+A question found in the text of an answer (a question mark, or one of a few French phrases such as "il me manque ton", listed once in `tree.py`) is marked "détecté automatiquement": it can be wrong, and it can miss a request. So an idle agent that declared nothing is shown as "Cet agent n'a pas dit s'il attend quelque chose", with the end of its last message. An agent that ends its answer with one of these lines says itself how it stands, and nothing is guessed (bold, code, a list mark, case, the accent and the spaces around the colons do not matter; FINI or PAUSE with a question in it counts as a decision):
+
+```text
+ÉTAT : QUESTION : <one sentence>
+ÉTAT : FINI : <one sentence>
+ÉTAT : PAUSE : attend <who or what>
+```
+
+Click a session to read its question word for word. **Répondre** opens that session on claude.ai in a new tab, when Claude Code gave it a link there. Departments come from `departments.json` (see [examples/departments.json](examples/departments.json)); a session that fits none is under "Sans équipe".
 
 ### 2. Any conversation, one click away
 
-Click a desk and that agent's conversation opens next to the board: what you asked, what it answered, which tools it used. It refreshes while you read. You no longer switch terminals to find out where something stands.
+Click a session, then **Lire la conversation**, and that agent's conversation opens next to the board: what you asked, what it answered, which tools it used. It refreshes while you read. You no longer switch terminals to find out where something stands.
 
 ### 3. Agents that know their team
 
@@ -79,11 +89,11 @@ $ agent.py inbox --wait 240
 
 ### 5. A button to add an agent
 
-**+ New agent** on the board asks for a folder and a task, then opens a terminal running Claude Code there, already working on it.
+**Nouvel agent** on the board asks for a folder and a task, then opens a terminal running Claude Code there, already working on it.
 
 ### 6. A task list, and a runner that works through it
 
-Not everything needs a conversation. Put work on the list (**+ Task** on the board, or `agent.py task add` from any agent) and press **Run tasks**. The runner takes each ready task in turn, hands it to a worker, and shows that worker as a desk while it runs. A task can wait for others (`--after T-1,T-2`), gets a limited number of attempts, and ends as done, or as blocked with the reason, so the ones that need you are the ones you see.
+Not everything needs a conversation. Put work on the list (**Nouvelle tâche** on the board, or `agent.py task add` from any agent) and press **Lancer les tâches**. The runner takes each ready task in turn, hands it to a worker, and shows that worker as a desk while it runs. A task can wait for others (`--after T-1,T-2`), gets a limited number of attempts, and ends as done, or as blocked with the reason, so the ones that need you are the ones you see.
 
 ```text
 $ agent.py task add ./webapp "Pricing page copy" "Three tiers, plain language, no claims we cannot back." --kind cheap
@@ -112,7 +122,7 @@ By default the worker is a headless Claude Code session (`claude -p`) in the tas
 
 ### 7. A floor manager
 
-**Start manager** on the board opens a Claude Code session with one job: run the team. You give it a goal. It keeps the task list, hands file work to the runner and anything that needs a shell or a browser to a live agent, sleeps until something changes (`agent.py wait`), checks what comes back, retries what was unclear, and comes to you only for what is yours to decide: money, anything sent to a client or published, anything that cannot be undone, and whatever is blocked twice.
+**Gestionnaire** on the board opens a Claude Code session with one job: run the team. You give it a goal. It keeps the task list, hands file work to the runner and anything that needs a shell or a browser to a live agent, sleeps until something changes (`agent.py wait`), checks what comes back, retries what was unclear, and comes to you only for what is yours to decide: money, anything sent to a client or published, anything that cannot be undone, and whatever is blocked twice.
 
 Its rulebook is [`manager.md`](manager.md), a plain file you can edit. The manager receives it as the output of its first command, `agent.py manager start`, not by opening the file: a session has to ask you before it reads outside its own project. The other agents are told who the manager is, and close the tasks it assigns them with `task done` or `task blocked`.
 
@@ -282,6 +292,7 @@ The parts worth knowing:
 | `OFFICE_WORKER_TIMEOUT` | `3600` | Seconds before a worker is stopped. |
 | `OFFICE_CHECK_TIMEOUT` | `900` | Seconds before a check command is stopped. |
 | `OFFICE_TEAM_FILE` | `team.md` next to `hook.py` | Your own team rules. Re-sent to running sessions when it changes. |
+| `OFFICE_DEPARTMENTS` | `departments.json` next to `office.py` | Owners, departments and posts of the tree. Read again when it changes, up to 1 MB; a department listed twice is kept once. Keep the real one out of git. |
 | `OFFICE_BRIEF=0` | on | Do not tell sessions about their teammates. |
 | `OFFICE_DB` | `./office.db` | Where the SQLite file lives. |
 | `OFFICE_CLAUDE_BIN` | found on `PATH` | The `claude` executable used for new agents. |
@@ -290,13 +301,13 @@ The parts worth knowing:
 
 ## Contributing
 
-Issues and pull requests are welcome. The most useful thing right now is a report from macOS or Linux on whether **+ New agent** opens a terminal correctly.
+Issues and pull requests are welcome. The most useful thing right now is a report from macOS or Linux on whether **Nouvel agent** opens a terminal correctly.
 
 The tests need nothing but Python and start no Claude session: `python -m unittest discover -s tests`.
 
 ## License
 
-MIT, see [LICENSE](LICENSE).
+MIT, see [LICENSE](LICENSE). The typeface embedded in `board.html` is under the SIL Open Font License 1.1, see [licenses/OFL-Atkinson-Hyperlegible-Next.txt](licenses/OFL-Atkinson-Hyperlegible-Next.txt).
 
 ## Status for a manager, and remote access
 
