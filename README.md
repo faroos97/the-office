@@ -4,9 +4,11 @@
 
 One board shows every session you have open and which one needs you. Every session knows who its teammates are and what they are working on, so they reuse each other's work, ask each other for things, and start new agents when a job belongs to someone else. You stop being the messenger.
 
-![The Office: the board on the left, one agent's conversation on the right](docs/screenshot.jpg)
+![The Office: a family tree of the team; three sessions wait for a decision and are numbered by urgency; the question of number 3 is open at the bottom with a Répondre button](docs/screenshot.jpg)
 
-About 1,150 lines of Python and one HTML file. No dependencies, no API key, nothing leaves your machine.
+*Fictional team. The board is in French.*
+
+About 4,200 lines of Python and one HTML file. No dependencies, no API key, nothing leaves your machine.
 
 ## The problem
 
@@ -39,7 +41,11 @@ A question found in the text of an answer (a question mark, or one of a few Fren
 ÉTAT : PAUSE : attend <who or what>
 ```
 
-Click a session to read its question word for word. **Répondre** opens that session on claude.ai in a new tab, when Claude Code gave it a link there. Departments come from `departments.json` (see [examples/departments.json](examples/departments.json)); a session that fits none is under "Sans équipe".
+Click a session to read its question word for word. **Répondre** opens that session on claude.ai in a new tab, when Claude Code gave it a link there (a session under Remote Control), so you answer it from the same page, on your computer or your phone. On a phone every department starts folded, with its numbers on the right:
+
+<img src="docs/screenshot-phone.jpg" width="300" alt="The same board on a phone: departments folded, numbered decisions on the right">
+
+To get the `ÉTAT` line from every agent, ask for it in your `team.md` (see [Teach it your team](#teach-it-your-team)). Departments come from `departments.json` (see [examples/departments.json](examples/departments.json)); a session that fits none is under "Sans équipe".
 
 ### 2. Any conversation, one click away
 
@@ -196,6 +202,8 @@ Shared ground:
 - All agents share one git checkout. Do not switch branches while others are working.
 ```
 
+Add the `ÉTAT` line rule (it is at the end of [`examples/team.md`](examples/team.md)) and the board no longer has to guess who waits for you.
+
 Every session receives it at start, and again whenever the file changes, with its next prompt. That last rule matters more than it looks: several agents in one checkout will switch branches under each other unless told not to.
 
 **Standing orders the harness enforces.** A rule an agent has to remember is a rule it will sometimes forget. For "when I say X, do Y", add a prompt trigger to `config.json`: when a prompt matches, the hook adds the line to that session's context right then, in every session, with no agent having to remember anything.
@@ -238,12 +246,15 @@ Without a `config.json`, the built-in worker runs `claude -p` and you can pass i
 | `hook.py` | Runs on every Claude Code event. Reports it to the server, and prints the roster, the rules and any messages so Claude Code adds them to the session's context. |
 | `agent.py` | The tool agents use to see and reach each other, and to queue tasks. |
 | `runner.py` | Works through the task list: claims ready tasks, runs a worker for each, runs the task's check, records the outcome. |
+| `tree.py` | Builds the family tree: departments from `departments.json`, one state per session, decisions numbered by urgency. |
+| `transcripts.py` | Reads the end of a transcript safely: the title, the last answer, the `ÉTAT` line, the reply link. |
+| `models.py` | Model routing table and the per-agent model log. |
 | `manager.md` | The floor manager's rulebook. |
-| `board.html` | The board. Polls the server every two seconds. |
+| `board.html` | The board. Polls the server every two seconds; one request at a time per endpoint. |
 
 The parts worth knowing:
 
-- **Titles** come from Claude Code. It writes a rolling title for each session into the transcript, and the server reads the newest one.
+- **Titles** come from Claude Code: the name you gave the session (`--name`, `/rename`) first, otherwise the rolling title Claude Code writes into the transcript. Only the end of the file is read, so a 100 MB transcript costs milliseconds.
 - **Conversations** are read from the end of a session's transcript file, on your machine, and only for a session whose own hook reported that file.
 - **Presence** needs no cleanup. A session that goes silent while working turns idle after two minutes and leaves the board after an hour. A clean exit removes it at once.
 - **Messages** wait in the server until the recipient collects them. At the end of a turn, the hook hands a waiting message back to Claude as a reason to keep going. That happens at most once per turn, so two agents cannot keep each other running forever.
@@ -280,6 +291,7 @@ The parts worth knowing:
 - Starting new sessions is off unless you pass `--allow-spawn`.
 - The server answers the board and local programs only. A request that names another website as its origin, or reaches the server under another host name, is refused, so a page open in your browser cannot queue tasks or start agents behind your back.
 - The runner executes only the check commands written in your `config.json`. A task names a check; it never carries a command.
+- Remote access is off until you set `remote_host`. Then only that host name, through `tailscale serve` on your own tailnet, with the token, is accepted; a Funnel (public internet) request is always refused. Whoever holds the token and a device on your tailnet can read your conversations and start agents: keep it off chats and screenshots.
 
 ## Configuration
 
@@ -314,7 +326,7 @@ MIT, see [LICENSE](LICENSE). The typeface embedded in `board.html` is under the 
 - `python agent.py status` (or `GET /api/status`, `--json`) lists every agent: state, title, last ask, time in that state, last message.
 - A session whose process is gone is dropped from the board at once (the hook reports the Claude pid).
 - "Claude is waiting for your input" is the idle notice, shown as *waiting*, not *blocked*. Only a permission or question is *blocked*.
-- From your phone: the server stays on 127.0.0.1; `tailscale serve --bg --https=443 http://127.0.0.1:8741` publishes it on your tailnet only (never Funnel). Set `remote_host` in config.json, then open `https://<host>/?token=<contents of office.token>` once per device. Without the token, or via Funnel, requests get 403. `scripts/install_office_task.ps1` registers the logon task.
+- From your phone: the server stays on 127.0.0.1; `tailscale serve --bg --https=443 http://127.0.0.1:8741` publishes it on your tailnet only (never Funnel). Set `remote_host` in config.json, then open `https://<host>/?token=<contents of office.token>` once per device. The page then keeps the token in a secure cookie for a year and drops it from the address bar. Without the token, or via Funnel, requests get 403. To lock every device out, replace `office.token` with a new random value. To get the link onto a phone without pasting it into a chat, show it on the computer as a QR code, or send it with Taildrop. `scripts/install_office_task.ps1` registers the logon task.
 
 ## Model routing
 
