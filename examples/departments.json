@@ -1,0 +1,32 @@
+{
+  "owners": ["Camille", "Sacha"],
+  "manager": {
+    "label": "Master Orchestrator",
+    "to_create": ["Analyste", "Stratège"]
+  },
+  "departments": [
+    {
+      "id": "acquisition",
+      "label": "Marketing et acquisition",
+      "includes": ["SEO", "AEO", "GEO"],
+      "words": ["infolettre"],
+      "folders": ["marketing"],
+      "roles": ["redaction"],
+      "to_create": ["Chef"]
+    },
+    {
+      "id": "atelier",
+      "label": "Atelier",
+      "agents": ["Refonte du site Boulangerie Fictive"],
+      "folders": ["site", "maquettes"],
+      "roles": ["site-dev"],
+      "to_create": ["Chef", "Directeur artistique"]
+    },
+    {
+      "id": "administration",
+      "label": "Administration",
+      "words": ["facture", "factures"],
+      "to_create": ["Chef"]
+    }
+  ]
+}

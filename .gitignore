@@ -28,3 +28,6 @@ Thumbs.db
 model_log.jsonl
 /office-server*.log
 /office-serve.log
+
+# Your own departments (copy examples/departments.json to departments.json and edit)
+/departments.json

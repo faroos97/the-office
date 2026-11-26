@@ -12,3 +12,7 @@ Who asks whom:
 Shared ground:
 - All agents share one git checkout. Do not switch branches while others are working; use a worktree.
 - Commit only the files you changed.
+
+Last line of every reply to me (the board reads it):
+- End your reply with exactly one line: `ÉTAT : QUESTION : <the one thing you need from me>`, `ÉTAT : FINI : <what is done>`, or `ÉTAT : PAUSE : attend <who or what>`.
+- No such line inside files, commits, or messages to other agents.

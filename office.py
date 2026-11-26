@@ -32,10 +32,14 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs
 
 import models
+import transcripts
+import tree
 
 HOST = "127.0.0.1"           # localhost only, always
 DEFAULT_PORT = 8741
@@ -144,29 +148,16 @@ def titleize(prompt):
     return text[0].upper() + text[1:]
 
 
-def aititle_from_transcript(path):
-    """Claude Code writes its OWN rolling, conversation-aware session title into the
-    transcript as JSONL entries {"type":"ai-title","aiTitle":...}. That is the clean
-    headline you see in Claude Code, so we prefer it. Reverse-scan for the newest one;
-    a cheap substring pre-filter means we parse only the title lines near the end."""
-    if not path or not os.path.exists(path):
-        return None
+def title_from_transcript(path):
+    """The name of the session, for the board's headline: the one it was given
+    (custom-title, what Claude Code shows), else Claude Code's own rolling title
+    (ai-title). Read from the end of the file, never the whole file: a hook is waiting."""
     try:
-        with open(path, encoding="utf-8") as f:
-            lines = f.readlines()
-    except OSError:
+        t = transcripts.title(path) or ""
+    except Exception as e:        # a damaged transcript must not lose the hook event
+        _damaged("title", "", e)
         return None
-    for ln in reversed(lines):
-        if '"aiTitle"' not in ln:
-            continue
-        try:
-            o = json.loads(ln)
-        except ValueError:
-            continue
-        if o.get("type") == "ai-title" and o.get("aiTitle"):
-            t = " ".join(str(o["aiTitle"]).split())
-            return t[:TASK_MAX] + ("…" if len(t) > TASK_MAX else "")
-    return None
+    return (t[:TASK_MAX] + ("…" if len(t) > TASK_MAX else "")) or None
 
 
 # ---------------------------------------------------------------- store (sqlite)
@@ -292,13 +283,18 @@ def _log_agent(row, verdict=None):
     if (row.get("session_id") or "").startswith("task-"):
         return
     try:
+        tokens = models.transcript_tokens(row.get("transcript_path"))
+    except Exception as e:        # damaged: the line is written without its tokens
+        _damaged("tokens", row.get("session_id"), e)
+        tokens = None
+    try:
         models.append_log({
             "session": row.get("session_id"),
             "title": row.get("task") or row.get("name") or "(untitled)",
             "type": row.get("route_type") or "unrouted",
             "model": row.get("route_model") or row.get("model") or "unknown",
             "verdict": verdict or row.get("verdict") or "unrated",
-            "tokens": models.transcript_tokens(row.get("transcript_path"))})
+            "tokens": tokens})
     except OSError:
         pass
 
@@ -333,8 +329,23 @@ def _is_idle_notice(payload):
         "claude is waiting for your input")
 
 
+def _usable(payload):
+    """The fields of a hook event the database can hold: texts (without half characters)
+    and a process id. Anything else is left out."""
+    if not isinstance(payload, dict):
+        return {}
+    out = {k: transcripts.plain(v) for k, v in payload.items() if isinstance(v, str)}
+    try:
+        pid = int(payload.get("pid") or 0)
+    except (TypeError, ValueError, OverflowError):
+        pid = 0
+    out.pop("pid", None)
+    return dict(out, pid=pid) if 0 < pid < 2 ** 31 else out
+
+
 def report(payload):
     """Ingest one Claude Code hook event and upsert the session's desk."""
+    payload = _usable(payload)
     session_id = (payload.get("session_id") or "").strip()
     if not session_id:
         return {"ok": False, "error": "missing session_id"}
@@ -360,7 +371,7 @@ def report(payload):
 
         task = None
         if event in _TITLE_REFRESH_EVENTS:
-            task = aititle_from_transcript(payload.get("transcript_path"))
+            task = title_from_transcript(payload.get("transcript_path"))
         if not task and (payload.get("task") or
                          event in ("UserPromptSubmit", "SessionStart")):
             task = payload.get("task") or titleize(payload.get("prompt"))
@@ -408,6 +419,19 @@ def report(payload):
                 fields["route_type"], fields["route_model"] = _claim_spawn(
                     conn, session_id, payload.get("cwd"))
                 fields = {k: v for k, v in fields.items() if v is not None}
+            elif event == "SessionStart" and row["state"] in ("blocked", "waiting"):
+                # It is also sent after a compaction or a resume: nobody answered, so an
+                # agent that was waiting still is. A permission prompt does not outlive
+                # its process; what is left of it is an agent waiting at its prompt.
+                new_process = (row["pid"] and fields.get("pid")
+                               and row["pid"] != fields["pid"])
+                if row["state"] == "blocked" and new_process:
+                    state, needs_you = "waiting", True
+                    activity = fields["activity"] = "finished, waiting for you"
+                else:
+                    state, needs_you = row["state"], bool(row["needs_you"])
+                    fields.pop("activity", None)
+                fields["state"], fields["needs_you"] = state, 1 if needs_you else 0
             if payload.get("verdict") in VERDICTS:
                 # the operator said good job (or the like): the work was accepted, so the
                 # model log line is written now, with the tokens spent so far
@@ -488,6 +512,85 @@ def _pid_alive(pid):
         return True            # no /proc (macOS): alive is all we know
 
 
+def _epoch(stamp, fallback=0.0):
+    """SQLite's "YYYY-MM-DD HH:MM:SS" (UTC) as epoch seconds."""
+    try:
+        return datetime.datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=datetime.timezone.utc).timestamp()
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _departments():
+    return tree.load_departments(os.environ.get("OFFICE_DEPARTMENTS") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "departments.json"))
+
+
+def _true_title(row, facts, spawn_name):
+    """The name shown for a session: custom-title, ai-title, the name it was started
+    with, what a hook or a reporter called it, else what it was last asked."""
+    return (facts["custom_title"] or facts["ai_title"] or spawn_name or row.get("task")
+            or titleize(_last_user_line(row.get("transcript_path"))) or None)
+
+
+_told = set()                # what was logged already: the board is asked every 2 s
+
+
+def _damaged(where, session_id, error):
+    """Log that one session could not be read: the kind of error and the line of code,
+    never what the session says. Once per kind and session."""
+    frame = traceback.extract_tb(error.__traceback__)[-1:]
+    at = "%s:%d" % (os.path.basename(frame[0].filename), frame[0].lineno) if frame else "?"
+    line = "%s: session %s: %s at %s" % (
+        where, re.sub(r"[^A-Za-z0-9-]", "?", str(session_id))[:8], type(error).__name__, at)
+    if line not in _told and len(_told) < 1000:
+        _told.add(line)
+        print(line, file=sys.stderr, flush=True)
+
+
+def _place(a, row, spawn_name, org, now, facts):
+    """What the tree says about one desk."""
+    seen = _epoch(row.get("updated_at"), now)
+    v = tree.view({"state": row.get("state") or "working", "activity": row.get("activity"),
+                   "seen": seen, "since": _epoch(row.get("state_since"), seen)}, facts, now)
+    title = _true_title(row, facts, spawn_name)
+    return dict(task=title, title=title, status=v["status"], question=v["question"],
+                options=v["options"], note=v["note"], text=v["text"], source=v["source"],
+                wait_secs=max(0, int(now - v["since"])), rank=None,
+                reply_url=transcripts.reply_url(facts["bridge"], a["session_id"]),
+                department=tree.department_of(title, a["session_id"], a["cwd"],
+                                              org["departments"]))
+
+
+def _add_tree(agents, rows, spawn_names):
+    """Give every desk its real name, how it stands (see tree.py), its department, its
+    rank and its reply link. A session whose data is damaged keeps what the hooks say of
+    it, and only that one. Returns the tree the page draws."""
+    org = _departments()
+    now = time.time()
+    for a in agents:
+        sid = a["session_id"]
+        row = rows[sid]
+        try:
+            a.update(_place(a, row, spawn_names.get(sid), org, now,
+                            transcripts.facts(row.get("transcript_path"))))
+            continue
+        except Exception as e:
+            _damaged("board", sid, e)
+        try:
+            a.update(_place(a, dict(row, transcript_path=None), spawn_names.get(sid), org,
+                            now, transcripts.facts(None)))
+        except Exception as e:
+            _damaged("board", sid, e)
+            a.update(title=a["task"], status="repos", question=None, options=[], note=None,
+                     source="hook", wait_secs=0, rank=None, reply_url=None,
+                     department=tree.NO_TEAM)
+        a["text"] = tree.UNREADABLE
+    for i, a in enumerate(tree.urgency_order(agents)):
+        a["rank"] = i + 1
+    return tree.public(org)
+
+
 def board():
     """The whole office, aged and ranked (loudest first). A desk whose session process
     is gone (its window was closed or killed, so no SessionEnd was ever sent) is removed
@@ -509,10 +612,14 @@ def board():
             " AS age_secs, CAST((julianday('now')-julianday(COALESCE(state_since,"
             "updated_at)))*86400 AS INTEGER) AS since_secs FROM agents"
             " ORDER BY updated_at DESC").fetchall()
+        spawn_names = {r["session_id"]: r["name"] for r in conn.execute(
+            "SELECT session_id, name FROM spawns WHERE session_id IS NOT NULL"
+            " AND name IS NOT NULL ORDER BY id")}
     finally:
         conn.close()
 
     agents = []
+    rows = [dict(r) for r in rows]
     for r in rows:
         r = dict(r)
         age = r.get("age_secs") or 0
@@ -521,7 +628,7 @@ def board():
             state, r["needs_you"] = "idle", 0
         try:
             recent = json.loads(r.get("recent") or "[]")
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
             recent = []
         agents.append({
             "session_id": r["session_id"], "name": r.get("name") or "session",
@@ -532,6 +639,7 @@ def board():
             "state_secs": int(r.get("since_secs") or age), "pid": r.get("pid"),
         })
     agents.sort(key=lambda a: (_RANK.get(a["state"], 9), a["age_secs"]))
+    org = _add_tree(agents, {r["session_id"]: r for r in rows}, spawn_names)
     needs = [a for a in agents if a["state"] in ("blocked", "waiting")]
     work = [a for a in agents if a["state"] == "working"]
     idle = [a for a in agents if a["state"] in ("idle", "done", "offline")]
@@ -558,7 +666,11 @@ def board():
     return {"agents": agents,
             "buckets": {"needs_you": needs, "working": work, "idle": idle},
             "counts": {"total": len(agents), "needs_you": len(needs),
-                       "working": len(work), "idle": len(idle)},
+                       "working": len(work), "idle": len(idle),
+                       "asking": sum(1 for a in agents if a["rank"]),
+                       "travaille": sum(1 for a in agents if a["status"] == "travaille"),
+                       "repos": sum(1 for a in agents if a["status"] == "repos")},
+            "tree": org,
             "manager": boss, "manager_dir": _config().get("manager_dir") or "",
             "can_spawn": os.environ.get("OFFICE_ALLOW_SPAWN") == "1"}
 
@@ -615,6 +727,9 @@ def _tail_lines(path, nbytes):
     return lines[1:] if start > 0 else lines   # drop the partial first line
 
 
+_ODD_ENTRY = (ValueError, RecursionError, TypeError, AttributeError)
+
+
 def _entry_to_message(o):
     """One transcript JSONL entry -> {role, text, tools} or None. Keeps what a human
     would call the conversation: what the user typed, what the agent said, and which
@@ -659,8 +774,8 @@ def conversation(target, limit=CONVO_MAX_MSGS):
         return {"ok": False, "error": "no agent matches %r" % target}
     path = row.get("transcript_path")
     head = {"ok": True, "session_id": row["session_id"], "name": row.get("name"),
-            "title": row.get("task"), "state": row.get("state"),
-            "cwd": row.get("cwd"), "messages": []}
+            "title": transcripts.title(row.get("transcript_path")) or row.get("task"),
+            "state": row.get("state"), "cwd": row.get("cwd"), "messages": []}
     if not path or not os.path.exists(path):
         head["note"] = "no transcript yet for this session"
         return head
@@ -675,7 +790,7 @@ def conversation(target, limit=CONVO_MAX_MSGS):
             continue
         try:
             m = _entry_to_message(json.loads(ln))
-        except ValueError:
+        except _ODD_ENTRY:
             continue
         if not m:
             continue
@@ -840,7 +955,7 @@ def _last_user_line(path, max_chars=140):
             continue
         try:
             m = _entry_to_message(json.loads(ln))
-        except ValueError:
+        except _ODD_ENTRY:
             continue
         if m and m["role"] == "user" and m["text"]:
             one = " ".join(m["text"].split())
@@ -1422,8 +1537,8 @@ def _agent_flags(extra, area, task, rules=True, override=None, name=None):
     flags += ["--model", model]
     if name and "--name" not in flags and "-n" not in flags:
         flags += ["--name", name]
-    # Every agent runs at the configured effort (Yass 2026-11-13: medium, to save the
-    # weekly quota), whatever the user-level effortLevel says.
+    # Optional: force an effort for every agent. Unset by default (Yass 2026-11-14:
+    # agents use Claude's own default effort, never a forced level).
     effort = _config().get("agent_effort")
     if effort and "--effort" not in flags:
         flags += ["--effort", str(effort)]
@@ -1701,7 +1816,7 @@ class Handler(BaseHTTPRequestHandler):
     def _send(self, status, body, ctype):
         if isinstance(body, (dict, list)):
             body = json.dumps(body, ensure_ascii=False)
-        body = body.encode("utf-8")
+        body = body.encode("utf-8", "replace")
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
@@ -1841,7 +1956,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             n = int(self.headers.get("Content-Length") or 0)
             payload = json.loads(self.rfile.read(n).decode("utf-8")) if n else {}
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
             return self._send(200, {"ok": False, "error": "bad body"},
                               "application/json")
         self._send(200, fn(payload), "application/json")
